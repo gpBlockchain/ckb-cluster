@@ -18,10 +18,13 @@ Options:
   --ckb PATH             Default: local download (CKB_BIN override supported)
   --miners N --syncs M    Default: 2 + 2; set during init
   --mode MODE            solo (default), staggered, race, ondemand
-  --interval-ms N        Default: 8000
+  --pow ALGORITHM        dummy (default) or eaglesong; immutable per cluster
+  --interval-ms N        Default: 8000; Dummy delay / staggered startup spacing
+  --timeout N            Default: 60 seconds; mine or Eaglesong startup
   --rpc-base N --p2p-base N  Default: 18114 / 18215
 Configuration: edit cluster.env while stopped (plain KEY=value, not shell).
-mining uses Dummy/Constant; race has no interval guarantee; staggered is heuristic.
+Dummy uses Constant delays; Eaglesong uses one CPU thread per miner.
+Eaglesong/race have no interval guarantee; staggered is only heuristic.
 mine watches main-chain height, may overshoot; nonce --limit is NOT height +K.
 EOF
 }
@@ -33,6 +36,7 @@ case "$CMD" in init|up|down|status|add-node|pause-mining|resume-mining|mine|logs
 PROJECT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 ROOT=${CLUSTER_ROOT:-$PROJECT_DIR/tmp}
 MINERS=2 SYNCS=2 RPC_BASE=18114 P2P_BASE=18215 BLOCK_INTERVAL_MS=8000 MINING_MODE=solo
+POW_ALGO=dummy
 CKB_BIN=${CKB_BIN:-}
 LOCK_ARG=0x0000000000000000000000000000000000000000
 GENESIS_MESSAGE=ckb-cluster-dev
@@ -50,6 +54,7 @@ while [ $# -gt 0 ]; do
     --miners) OVERRIDES+=(MINERS "$2");; --syncs) OVERRIDES+=(SYNCS "$2");;
     --rpc-base) OVERRIDES+=(RPC_BASE "$2");; --p2p-base) OVERRIDES+=(P2P_BASE "$2");;
     --interval-ms) OVERRIDES+=(BLOCK_INTERVAL_MS "$2");; --mode) OVERRIDES+=(MINING_MODE "$2");;
+    --pow) OVERRIDES+=(POW_ALGO "$2");;
     --node) NODE=$2;; --role) ROLE=$2;; --blocks) BLOCKS=$2;; --timeout) TIMEOUT=$2;;
     *) die "Unknown option: $1";;
   esac
@@ -59,7 +64,7 @@ for dep in jq curl awk lsof realpath; do command -v "$dep" >/dev/null || die "Mi
 ROOT=$(realpath "$ROOT")
 case "$ROOT" in /|"$HOME"|"$PROJECT_DIR"|*$'\n'*|*$'\r'*|*$'\t'*) die 'Choose a dedicated cluster subdirectory';; esac
 case "$PROJECT_DIR/" in "$ROOT/"*) die 'Root must not contain the project';; esac
-KEYS='MINERS SYNCS RPC_BASE P2P_BASE BLOCK_INTERVAL_MS MINING_MODE CKB_BIN LOCK_ARG GENESIS_MESSAGE'
+KEYS='MINERS SYNCS RPC_BASE P2P_BASE BLOCK_INTERVAL_MS MINING_MODE POW_ALGO CKB_BIN LOCK_ARG GENESIS_MESSAGE'
 if [ -f "$ROOT/cluster.env" ]; then
   while IFS='=' read -r key value; do
     case "$key" in ''|'#'*) continue;; esac
@@ -69,6 +74,9 @@ fi
 for ((i=0; i<${#OVERRIDES[@]}; i+=2)); do
   key=${OVERRIDES[i]}; value=${OVERRIDES[i+1]}
   if [ -f "$ROOT/.ready" ]; then
+    if [ "$key" = POW_ALGO ] && [ "$POW_ALGO" != "$value" ]; then
+      die 'PoW is immutable for an initialized cluster; use a new --root'
+    fi
     [ "${!key}" = "$value" ] || die "Existing cluster: edit cluster.env while stopped; topology/ports require re-init"
   fi
   printf -v "$key" '%s' "$value"
@@ -80,6 +88,7 @@ done
 [ "$MINERS" -ge 1 ] && [ "$((MINERS+SYNCS))" -le 64 ] || die 'Use 1..64 nodes, at least one miner'
 [ "$BLOCK_INTERVAL_MS" -gt 0 ] && [ "$BLOCKS" -gt 0 ] && [ "$TIMEOUT" -gt 0 ] || die 'Interval/blocks/timeout must be positive'
 case "$MINING_MODE" in solo|staggered|race|ondemand) ;; *) die 'Invalid mining mode';; esac
+case "$POW_ALGO" in dummy|eaglesong) ;; *) die 'Invalid PoW algorithm; use --pow dummy|eaglesong';; esac
 case "$ROLE" in miner|sync) ;; *) die 'Invalid role';; esac
 [[ "$NODE" =~ ^(all|miner-[0-9]+|sync-[0-9]+)$ ]] || die 'Invalid node ID'
 [[ "$LOCK_ARG" =~ ^0x[0-9a-fA-F]{40}$ ]] || die 'LOCK_ARG must be 20 bytes'
@@ -248,10 +257,12 @@ rpc_url = "http://127.0.0.1:$RP/"
 block_on_submit = true
 poll_interval = 100
 [[miner.workers]]
-worker_type = "Dummy"
-delay_type = "Constant"
-value = $delay
 EOF
+  if [ "$POW_ALGO" = eaglesong ]; then
+    printf 'worker_type = "EaglesongSimple"\nthreads = 1\n' >> "$DIR/ckb-miner.toml"
+  else
+    printf 'worker_type = "Dummy"\ndelay_type = "Constant"\nvalue = %s\n' "$delay" >> "$DIR/ckb-miner.toml"
+  fi
 }
 init_node() {
   local id=$1 role=$2 idx=$3 peer genesis boot='[]'
@@ -265,13 +276,14 @@ init_node() {
   "$CKB_BIN" "${args[@]}" > "$DIR/logs/init.log" 2>&1
   if [ ! -f "$ROOT/shared/spec.toml" ]; then
     # Freeze a shared timestamp once; later nodes copy these exact bytes.
-    awk -v ts="$(date +%s)000" '
+    awk -v ts="$(date +%s)000" -v pow="$POW_ALGO" '
       /^\[/ { section=$0 }
       section=="[genesis]" && /^timestamp[[:space:]]*=/ { print "timestamp = " ts; next }
-      section=="[params]" && /^(genesis_epoch_length|permanent_difficulty_in_dummy)[[:space:]]*=/ { next }
-      section=="[pow]" && /^func[[:space:]]*=/ { print "func = \"Dummy\""; next }
+      section=="[params]" && /^permanent_difficulty_in_dummy[[:space:]]*=/ { next }
+      pow=="dummy" && section=="[params]" && /^genesis_epoch_length[[:space:]]*=/ { next }
+      section=="[pow]" && /^func[[:space:]]*=/ { print "func = \"" (pow=="dummy" ? "Dummy" : "Eaglesong") "\""; next }
       { print }
-      /^\[params\]/ { print "genesis_epoch_length = 1000\npermanent_difficulty_in_dummy = true" }
+      /^\[params\]/ && pow=="dummy" { print "genesis_epoch_length = 1000\npermanent_difficulty_in_dummy = true" }
     ' "$DIR/specs/dev.toml" > "$ROOT/shared/spec.toml"
   fi
   cp "$ROOT/shared/spec.toml" "$DIR/specs/dev.toml"
@@ -397,6 +409,11 @@ intervals() {
     prev=$ts
   done
   if [ "$count" -gt 0 ]; then
+    if [ "$POW_ALGO" = eaglesong ]; then
+      echo "average_interval_ms=$((sum/count)) pow=$POW_ALGO mode=$MINING_MODE"
+      echo 'INFO: Eaglesong uses real CPU PoW; block intervals are probabilistic'
+      return
+    fi
     echo "average_interval_ms=$((sum/count)) target_ms=$BLOCK_INTERVAL_MS mode=$MINING_MODE"
     if [ "$MINING_MODE" = race ]; then echo 'INFO: race has no interval guarantee'
     elif [ "$((sum/count))" -lt "$((BLOCK_INTERVAL_MS*7/8))" ] || [ "$((sum/count))" -gt "$((BLOCK_INTERVAL_MS*9/8))" ]; then echo 'WARN: observed interval outside target ±12.5%'; fi
@@ -404,7 +421,7 @@ intervals() {
 }
 status() {
   local id r rp pp peer tip peers base h np mp failed=0
-  echo "time=$(date -u +%FT%TZ) mode=$MINING_MODE miners=$MINERS syncs=$SYNCS root=$ROOT"
+  echo "time=$(date -u +%FT%TZ) mode=$MINING_MODE pow=$POW_ALGO miners=$MINERS syncs=$SYNCS root=$ROOT"
   base=$(height miner-0 2>/dev/null) || base=0
   while read -r id r rp pp peer; do
     np=- mp=-; lookup "$id"
@@ -444,7 +461,9 @@ cmd_up() {
   connect_peers
   initial=$(height miner-0); resume
   if [ "$MINING_MODE" != ondemand ]; then
-    wait_s=$((BLOCK_INTERVAL_MS*MINERS*5/1000+30)); end=$((SECONDS+wait_s))
+    wait_s=$((BLOCK_INTERVAL_MS*MINERS*5/1000+30))
+    [ "$POW_ALGO" != eaglesong ] || wait_s=$TIMEOUT
+    end=$((SECONDS+wait_s))
     until [ "$(height miner-0)" -ge "$((initial+4))" ]; do
       [ "$SECONDS" -lt "$end" ] || die 'Mining timeout: main-chain height did not advance four blocks'
       sleep 1
@@ -499,6 +518,19 @@ if [ ! -f "$ROOT/.ckb-cluster" ]; then
 fi
 mkdir "$ROOT/.lock" 2>/dev/null || die "Cluster command already running; inspect $ROOT/.lock/owner"
 LOCKED=1; echo "$$" > "$ROOT/.lock/owner"
+# The shared spec is the persisted source of truth, including for old clusters
+# whose cluster.env predates POW_ALGO. Do not change consensus via config edits.
+case "$CMD" in
+  init|up|resume-mining|mine|add-node)
+    if [ -f "$ROOT/shared/spec.toml" ]; then
+      spec_pow=$(awk '
+        /^\[/ { section=$0 }
+        section=="[pow]" && /^func[[:space:]]*=/ { split($0,a,"\""); print a[2] }
+      ' "$ROOT/shared/spec.toml")
+      expected_pow=Dummy; [ "$POW_ALGO" != eaglesong ] || expected_pow=Eaglesong
+      [ "$spec_pow" = "$expected_pow" ] || die 'PoW differs from the saved chain spec; restore POW_ALGO or use a new --root'
+    fi;;
+esac
 case "$CMD" in
   init) cmd_init;;
   up) cmd_up;;
