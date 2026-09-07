@@ -349,8 +349,8 @@ init_node() {
     # Freeze a shared timestamp once; later nodes copy these exact bytes.
     awk -v ts="$(date +%s)000" -v pow="$POW_ALGO" '
       /^\[/ { section=$0 }
-      # Eaglesong uses CKB defaults: discard all params, including subtables.
-      pow=="eaglesong" && /^\[params\]/ { print "[params]\n"; next }
+      # Eaglesong overrides epoch timing only; discard other dev params and subtables.
+      pow=="eaglesong" && /^\[params\]/ { print "[params]\nepoch_duration_target = 14400\ngenesis_epoch_length = 1000\n"; next }
       pow=="eaglesong" && section ~ /^\[params(\]|\.)/ { next }
       section=="[genesis]" && /^timestamp[[:space:]]*=/ { print "timestamp = " ts; next }
       section=="[params]" && /^permanent_difficulty_in_dummy[[:space:]]*=/ { next }

@@ -75,14 +75,16 @@ for pow in dummy eaglesong; do
       grep -qx 'value = 8000' "$dir/nodes/miner-0/ckb-miner.toml"
     else
       grep -qx 'func = "Eaglesong"' "$dir/shared/spec.toml"
-      # The table itself remains, with neither values nor nested tables.
+      # Keep exactly the two epoch overrides, with no nested tables.
       awk '
         /^\[/ {section=$0; if ($0=="[params]") found++}
+        section=="[params]" && $0=="epoch_duration_target = 14400" {duration++; next}
+        section=="[params]" && $0=="genesis_epoch_length = 1000" {epoch_length_count++; next}
         section=="[params]" && $0!="[params]" && $0!~/^[[:space:]]*$/ {exit 1}
         /^\[params\./ {exit 1}
-        END {if (found!=1) exit 1}
+        END {if (found!=1 || duration!=1 || epoch_length_count!=1) exit 1}
       ' "$dir/shared/spec.toml"
-      ! grep -Eq '^(genesis_epoch_length|epoch_duration_target|cellbase_maturity|initial_primary_epoch_reward|permanent_difficulty_in_dummy|ckb2023)[[:space:]]*=' "$dir/shared/spec.toml"
+      ! grep -Eq '^(cellbase_maturity|initial_primary_epoch_reward|permanent_difficulty_in_dummy|ckb2023)[[:space:]]*=' "$dir/shared/spec.toml"
       grep -qx 'compact_target = 0x20010000' "$dir/shared/spec.toml"
       grep -qx 'worker_type = "EaglesongSimple"' "$dir/nodes/miner-0/ckb-miner.toml"
       grep -qx 'threads = 1' "$dir/nodes/miner-0/ckb-miner.toml"
