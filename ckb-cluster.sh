@@ -18,6 +18,8 @@ Options:
   --ckb PATH             Default: local download (CKB_BIN override supported)
   --miners N --syncs M    Default: 2 + 2; set during init
   --mode MODE            solo (default), staggered, race, ondemand
+  --miner-cpu N          0 (default): unlimited; 1..100: percent of one CPU core
+                        Optional cpulimit; missing tool warns and runs unlimited.
   --pow ALGORITHM        dummy (default) or eaglesong; immutable per cluster
   --interval-ms N        Default: 8000; Dummy delay / staggered startup spacing
   --timeout N            Default: 60 seconds; mine or Eaglesong startup
@@ -39,6 +41,7 @@ case "$CMD" in init|up|down|status|add-node|pause-mining|resume-mining|mine|logs
 PROJECT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 ROOT=${CLUSTER_ROOT:-$PROJECT_DIR/tmp}
 MINERS=2 SYNCS=2 RPC_BASE=18114 P2P_BASE=18215 BLOCK_INTERVAL_MS=8000 MINING_MODE=solo
+MINER_CPU=0 CPU_EFFECTIVE=0 CPU_PREPARED=0 CPULIMIT_BIN=''
 POW_ALGO=dummy
 RPC_BIND=0.0.0.0 P2P_BIND=0.0.0.0
 CKB_BIN=${CKB_BIN:-}
@@ -59,6 +62,7 @@ while [ $# -gt 0 ]; do
     --rpc-base) OVERRIDES+=(RPC_BASE "$2");; --p2p-base) OVERRIDES+=(P2P_BASE "$2");;
     --interval-ms) OVERRIDES+=(BLOCK_INTERVAL_MS "$2");; --mode) OVERRIDES+=(MINING_MODE "$2");;
     --rpc-bind) OVERRIDES+=(RPC_BIND "$2");; --p2p-bind) OVERRIDES+=(P2P_BIND "$2");;
+    --miner-cpu) OVERRIDES+=(MINER_CPU "$2");;
     --pow) OVERRIDES+=(POW_ALGO "$2");;
     --node) NODE=$2;; --role) ROLE=$2;; --blocks) BLOCKS=$2;; --timeout) TIMEOUT=$2;;
     *) die "Unknown option: $1";;
@@ -69,7 +73,7 @@ for dep in jq curl awk lsof realpath; do command -v "$dep" >/dev/null || die "Mi
 ROOT=$(realpath "$ROOT")
 case "$ROOT" in /|"$HOME"|"$PROJECT_DIR"|*$'\n'*|*$'\r'*|*$'\t'*) die 'Choose a dedicated cluster subdirectory';; esac
 case "$PROJECT_DIR/" in "$ROOT/"*) die 'Root must not contain the project';; esac
-KEYS='MINERS SYNCS RPC_BASE P2P_BASE BLOCK_INTERVAL_MS MINING_MODE POW_ALGO RPC_BIND P2P_BIND CKB_BIN LOCK_ARG GENESIS_MESSAGE'
+KEYS='MINERS SYNCS RPC_BASE P2P_BASE BLOCK_INTERVAL_MS MINING_MODE POW_ALGO RPC_BIND P2P_BIND MINER_CPU CKB_BIN LOCK_ARG GENESIS_MESSAGE'
 if [ -f "$ROOT/cluster.env" ]; then
   while IFS='=' read -r key value; do
     case "$key" in ''|'#'*) continue;; esac
@@ -84,6 +88,7 @@ for ((i=0; i<${#OVERRIDES[@]}; i+=2)); do
     fi
     if [ "${!key}" != "$value" ]; then
       case "$key" in
+        MINER_CPU) case "$CMD" in up|resume-mining|mine) ;; *) die 'Change --miner-cpu with up, resume-mining, or mine after pausing miners';; esac;;
         RPC_BIND|P2P_BIND) [ "$CMD" = up ] || die 'Change bindings with up after stopping all cluster processes';;
         *) die 'Existing cluster: edit cluster.env while stopped; topology/ports require re-init';;
       esac
@@ -102,6 +107,7 @@ case "$POW_ALGO" in dummy|eaglesong) ;; *) die 'Invalid PoW algorithm; use --pow
 for key in RPC_BIND P2P_BIND; do
   case "${!key}" in 127.0.0.1|0.0.0.0) ;; *) die "$key must be 127.0.0.1 or 0.0.0.0";; esac
 done
+[[ "$MINER_CPU" =~ ^(0|[1-9]|[1-9][0-9]|100)$ ]] || die '--miner-cpu must be an integer from 0 to 100'
 case "$ROLE" in miner|sync) ;; *) die 'Invalid role';; esac
 [[ "$NODE" =~ ^(all|miner-[0-9]+|sync-[0-9]+)$ ]] || die 'Invalid node ID'
 [[ "$LOCK_ARG" =~ ^0x[0-9a-fA-F]{40}$ ]] || die 'LOCK_ARG must be 20 bytes'
@@ -158,7 +164,7 @@ alive() {
     current=$(launchctl list "$label" 2>/dev/null | awk '$1=="\"PID\"" {gsub(/;/,"",$3);print $3}') || current=''
     if [[ "$current" =~ ^[0-9]+$ ]]; then
       command=$(ps -p "$current" -o command= 2>/dev/null) || command=''
-      case "$command" in *" $sub -C $(dirname "$1")")
+      case "$command" in *" $sub -C $(dirname "$1")"|*" $PROJECT_DIR/miner-runner.sh run "*" --node-dir $(dirname "$1")")
         sig=$(identity "$current") || return 1
         { echo "$current"; printf '%s\n' "$sig"; } > "$1";;
       esac
@@ -169,7 +175,7 @@ alive() {
   [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] || return 1
   kill -0 "$pid" 2>/dev/null && [ -n "$sig" ] && [ "$(identity "$pid")" = "$sig" ] || return 1
   command=$(ps -p "$pid" -o command= 2>/dev/null) || return 1
-  case "$command" in *" $sub -C $(dirname "$1")") return 0;; *) return 1;; esac
+  case "$command" in *" $sub -C $(dirname "$1")"|*" $PROJECT_DIR/miner-runner.sh run "*" --node-dir $(dirname "$1")") return 0;; *) return 1;; esac
 }
 stop_pid() {
   local file=$1 pid n
@@ -200,17 +206,65 @@ stop_pid() {
       if alive "$file"; then die "Process $pid still alive; data retained"; fi
     fi
   fi
+  if [ "$(basename "$file")" = miner.pid ]; then
+    /bin/bash "$PROJECT_DIR/miner-runner.sh" cleanup "$(dirname "$file")"
+    rm -f "$(dirname "$file")/miner.cpu-limit"
+  fi
   rm -f "$file"
+}
+prepare_miner_cpu() {
+  [ "$CPU_PREPARED" = 0 ] || return 0
+  CPU_EFFECTIVE=0
+  if [ "$MINER_CPU" -gt 0 ]; then
+    if [ -x "$PROJECT_DIR/bin/cpulimit/cpulimit" ]; then
+      CPULIMIT_BIN="$PROJECT_DIR/bin/cpulimit/cpulimit"
+    else
+      CPULIMIT_BIN=$(command -v cpulimit || true)
+    fi
+    if [ -n "$CPULIMIT_BIN" ]; then
+      CPULIMIT_BIN=$(realpath "$CPULIMIT_BIN")
+      CPU_EFFECTIVE=$MINER_CPU
+      case "$CPULIMIT_BIN" in
+        */Cellar/cpulimit/0.2/*)
+          if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
+            log 'WARN: stock Homebrew cpulimit 0.2 miscounts CPU time on Apple Silicon; CPU limiting is DISABLED. Run ./install-cpulimit.sh for the project-local corrected build'
+            CPU_EFFECTIVE=0
+          fi;;
+      esac
+    else
+      log 'WARN: cpulimit is not installed; CPU limiting is DISABLED (miners will run unlimited). Install: ./install-cpulimit.sh (macOS), or sudo apt install cpulimit (Debian/Ubuntu)'
+    fi
+  fi
+  local id r rp pp peer active
+  if [ -f "$ROOT/cluster.state" ]; then
+    while read -r id r rp pp peer; do
+      [ "$r" = miner ] || continue
+      if alive "$ROOT/nodes/$id/miner.pid"; then
+        active=0
+        [ ! -f "$ROOT/nodes/$id/miner.cpu-limit" ] || read -r active < "$ROOT/nodes/$id/miner.cpu-limit"
+        [ "$active" = "$CPU_EFFECTIVE" ] || die 'Pause all miners before changing the effective CPU limit'
+      fi
+    done < "$ROOT/cluster.state"
+  fi
+  CPU_PREPARED=1
 }
 launch() {
   local kind=$1 sub=$2 pid label n
   alive "$DIR/$kind.pid" && return 0
+  local command=("$CKB_BIN" "$sub" -C "$DIR")
+  if [ "$kind" = miner ]; then
+    /bin/bash "$PROJECT_DIR/miner-runner.sh" cleanup "$DIR"
+    printf '%s\n' "$CPU_EFFECTIVE" > "$DIR/miner.cpu-limit"
+    if [ "$CPU_EFFECTIVE" -gt 0 ]; then
+      command=(/bin/bash "$PROJECT_DIR/miner-runner.sh" run "$CPU_EFFECTIVE" "$CPULIMIT_BIN" "$CKB_BIN" --node-dir "$DIR")
+    fi
+  fi
   if [ "$(uname -s)" = Darwin ]; then
     # launchd keeps jobs independent of the invoking terminal/tool session.
     label="local.ckb-cluster.$(printf '%s' "$DIR/$kind" | cksum | awk '{print $1}')"
     launchctl remove "$label" 2>/dev/null || true
     echo "$label" > "$DIR/$kind.pid.launchd"
-    launchctl submit -l "$label" -o "$DIR/logs/$kind.log" -e "$DIR/logs/$kind.log" -- "$CKB_BIN" "$sub" -C "$DIR"
+    launchctl submit -l "$label" -o "$DIR/logs/$kind.log" -e "$DIR/logs/$kind.log" -- "${command[@]}"
     pid=''
     for ((n=0;n<50;n++)); do
       pid=$(launchctl list "$label" 2>/dev/null | awk '$1=="\"PID\"" {gsub(/;/,"",$3);print $3}')
@@ -219,7 +273,7 @@ launch() {
     done
     [ -n "$pid" ] || die "$ID $kind launchd startup failed"
   else
-    nohup "$CKB_BIN" "$sub" -C "$DIR" >> "$DIR/logs/$kind.log" 2>&1 < /dev/null &
+    nohup "${command[@]}" >> "$DIR/logs/$kind.log" 2>&1 < /dev/null &
     pid=$!
   fi
   { echo "$pid"; identity "$pid"; } > "$DIR/$kind.pid"
@@ -370,6 +424,7 @@ pause() {
 }
 resume() {
   local id r rp pp peer count delay started=0
+  prepare_miner_cpu; save_env
   [ "$MINING_MODE" != ondemand ] || { log 'ondemand: use mine'; return; }
   count=$(awk '$2=="miner"{n++}END{print n+0}' "$ROOT/cluster.state")
   delay=$BLOCK_INTERVAL_MS
@@ -434,17 +489,21 @@ intervals() {
   fi
 }
 status() {
-  local id r rp pp peer tip peers base h np mp failed=0
-  echo "time=$(date -u +%FT%TZ) mode=$MINING_MODE pow=$POW_ALGO rpc_bind=$RPC_BIND p2p_bind=$P2P_BIND miners=$MINERS syncs=$SYNCS root=$ROOT"
+  local id r rp pp peer tip peers base h np mp cap worker failed=0
+  echo "time=$(date -u +%FT%TZ) mode=$MINING_MODE pow=$POW_ALGO rpc_bind=$RPC_BIND p2p_bind=$P2P_BIND miner_cpu_requested=$MINER_CPU miners=$MINERS syncs=$SYNCS root=$ROOT"
   base=$(height miner-0 2>/dev/null) || base=0
   while read -r id r rp pp peer; do
-    np=- mp=-; lookup "$id"
+    np=- mp=- cap=- worker=-; lookup "$id"
     if alive "$DIR/node.pid"; then read -r np < "$DIR/node.pid"; fi
-    if alive "$DIR/miner.pid"; then read -r mp < "$DIR/miner.pid"; fi
+    if alive "$DIR/miner.pid"; then
+      read -r mp < "$DIR/miner.pid"; cap=0; worker=$mp
+      [ ! -f "$DIR/miner.cpu-limit" ] || read -r cap < "$DIR/miner.cpu-limit"
+      [ ! -f "$DIR/miner-worker.pid" ] || read -r worker < "$DIR/miner-worker.pid"
+    fi
     if tip=$(rpc "$id" get_tip_header 2>/dev/null) && peers=$(rpc "$id" get_peers 2>/dev/null); then
       h=$(printf '%s' "$tip" | field number hex)
-      echo "$id node_pid=$np miner_pid=$mp rpc=$rp p2p=$pp peers=$(printf '%s' "$peers" | jq length) height=$h lag=$((base-h)) hash=$(printf '%s' "$tip" | field hash) peer_id=$peer"
-    else echo "$id node_pid=$np miner_pid=$mp rpc=$rp OFFLINE"; failed=1; fi
+      echo "$id node_pid=$np miner_pid=$mp worker_pid=$worker cpu_limit=$cap rpc=$rp p2p=$pp peers=$(printf '%s' "$peers" | jq length) height=$h lag=$((base-h)) hash=$(printf '%s' "$tip" | field hash) peer_id=$peer"
+    else echo "$id node_pid=$np miner_pid=$mp worker_pid=$worker cpu_limit=$cap rpc=$rp OFFLINE"; failed=1; fi
   done < "$ROOT/cluster.state"
   if [ "$failed" -eq 0 ]; then intervals; fi
 }
@@ -503,6 +562,7 @@ cmd_up() {
     if ! alive "$DIR/node.pid"; then ports+=("$rp" "$pp"); fi
   done < "$ROOT/cluster.state"
   if [ "${#ports[@]}" -gt 0 ]; then free_ports "${ports[@]}"; fi
+  prepare_miner_cpu
   configure_bindings
   if [ "$RPC_BIND" = 0.0.0.0 ]; then log 'RPC listens on all IPv4 interfaces; restrict access to trusted hosts with a firewall'; fi
   while read -r id r rp pp peer; do lookup "$id"; launch node run; done < "$ROOT/cluster.state"
@@ -593,7 +653,7 @@ case "$CMD" in
     lookup "$NODE"; [ "$R" = miner ] || die 'Select a miner'
     alive "$DIR/node.pid" || die 'Run up first'
     for f in "$ROOT"/nodes/*/miner.pid; do if alive "$f"; then die 'Pause all miners before mine'; fi; done
-    need_ckb; initial=$(height "$NODE"); target=$((initial+BLOCKS)); end=$((SECONDS+TIMEOUT))
+    need_ckb; prepare_miner_cpu; save_env; initial=$(height "$NODE"); target=$((initial+BLOCKS)); end=$((SECONDS+TIMEOUT))
     cp "$DIR/ckb-miner.toml" "$DIR/ckb-miner.toml.before-mine"; MINE_ACTIVE=1
     write_miner 1000; launch miner miner
     until [ "$(height "$NODE")" -ge "$target" ]; do
@@ -604,7 +664,8 @@ case "$CMD" in
     log "Mined: start=$initial target=$target actual=$(height "$NODE")";;
   add-node)
     [ -f "$ROOT/.ready" ] || die 'Initialize first'
-    need_ckb; lookup miner-0; alive "$DIR/node.pid" || die 'Run up first'
+    need_ckb; [ "$ROLE" != miner ] || prepare_miner_cpu
+    lookup miner-0; alive "$DIR/node.pid" || die 'Run up first'
     idx=$(wc -l < "$ROOT/cluster.state"); [ "$idx" -lt 64 ] || die 'Maximum 64 nodes'
     next=$(awk -v role="$ROLE" '$2==role {split($1,a,"-"); if(a[2]>=n)n=a[2]+1}END{print n+0}' "$ROOT/cluster.state")
     id="$ROLE-$next"

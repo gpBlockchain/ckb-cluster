@@ -1,6 +1,6 @@
 # CKB Local Multi-Node Cluster
 
-A single-file Bash script for running a local CKB cluster. Requires `ckb`, `curl`, `jq`, `awk`, `lsof`, and `realpath`. No Python dependency.
+Bash scripts for running a local CKB cluster. Requires `ckb`, `curl`, `jq`, `awk`, `lsof`, and `realpath`. No Python dependency.
 
 ## Quick Start
 
@@ -68,6 +68,39 @@ New clusters default to **`--rpc-bind 0.0.0.0 --p2p-bind 0.0.0.0`**, allowing ac
 
 Configuration reference: [CKB's dev-chain miner guide](https://github.com/nervosnetwork/ckb/blob/develop/docs/dev-miner.md).
 
+## Optional Miner CPU Limit
+
+`--miner-cpu N` limits **each miner process** to approximately `N` percent of one logical CPU core. The default is **0 (unlimited)**; supported limits are 1–100. Node processes are not throttled. Two miners limited to 20 each can together consume roughly 40 percent of one core, plus node and supervisor overhead. This controls average CPU use, not a precise hash rate, and lower limits can increase block times and mining timeouts.
+
+Install the optional dependency:
+
+```bash
+./install-cpulimit.sh             # macOS: project-local build (requires Xcode CLT)
+sudo apt install cpulimit         # Debian / Ubuntu
+```
+
+```bash
+# New capped CPU-mining cluster; choose unused ports.
+./ckb-cluster.sh up --root tmp-capped --pow eaglesong --miner-cpu 20 \
+  --rpc-base 25114 --p2p-base 25215 --timeout 180
+
+# Change a saved limit without stopping the node processes.
+./ckb-cluster.sh pause-mining --root tmp-capped
+./ckb-cluster.sh resume-mining --root tmp-capped --miner-cpu 30
+
+# Disable the limit explicitly.
+./ckb-cluster.sh pause-mining --root tmp-capped
+./ckb-cluster.sh resume-mining --root tmp-capped --miner-cpu 0
+```
+
+- On macOS, the installer builds checksum-pinned upstream 0.2 with a Mach-timebase correction, retains the source archive/license/patch, and installs only into `bin/cpulimit/`. This addresses the incorrect CPU accounting observed with the stock Homebrew 0.2 build on Apple Silicon. It leaves Homebrew and PATH unchanged; repeated installation verifies the existing binary. The cluster prefers this local build, then searches PATH. A detected stock Homebrew 0.2 on Apple Silicon is treated as unavailable, with a warning and installation hint.
+- `cpulimit` is **optional**. If a nonzero limit is requested but the tool is missing, the script prints installation instructions and an explicit warning, then continues with **unlimited miners**. It never installs packages automatically. The requested value is retained, so it can apply after installation and a miner restart.
+- The value is saved as `MINER_CPU` and applies to both continuous and on-demand mining (`mine --miner-cpu N`). Pause all miners before changing an active limit. `status` shows the requested setting and each active miner's effective `cpu_limit` (`0` means unlimited).
+- Capped miners run under the internal `miner-runner.sh` supervisor, which owns the CKB worker and the PID-targeted limiter. `miner_pid` identifies the supervisor; `worker_pid` identifies the actual CKB mining process. Uncapped miners still launch directly.
+- Pause, shutdown, and on-demand completion stop the limiter and resume/terminate a suspended worker. If the limiter exits unexpectedly after startup, the supervisor stops its miner rather than silently removing the cap. A supervised miner restart starts a fresh limiter for its new PID. Keep `miner-runner.sh` alongside `ckb-cluster.sh`.
+
+CPU usage varies over short sampling windows. The limiter uses process suspension/resumption; see the [cpulimit implementation](https://github.com/opsengine/cpulimit).
+
 ## Managing the Cluster
 
 ```bash
@@ -125,6 +158,7 @@ On macOS, nodes are managed by launchd without creating startup jobs; `down` rem
 bash tests/default-ckb.sh
 bash tests/pow.sh
 bash tests/bind.sh
+bash tests/miner-cpu.sh
 ```
 
 These tests use local fixtures and do not start nodes or download binaries.
