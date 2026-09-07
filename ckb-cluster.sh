@@ -20,7 +20,8 @@ Options:
   --mode MODE            solo (default), staggered, race, ondemand
   --miner-cpu N          0 (default): unlimited; 1..100: percent of one CPU core
                         Optional cpulimit; missing tool warns and runs unlimited.
-  --pow ALGORITHM        dummy (default) or eaglesong; immutable per cluster
+  --pow ALGORITHM        dummy (default) or eaglesong; Dummy/Eaglesong also accepted
+                        Immutable per cluster
   --interval-ms N        Default: 8000; Dummy delay / staggered startup spacing
   --timeout N            Default: 60 seconds; mine or Eaglesong startup
   --rpc-base N --p2p-base N  Default: 18114 / 18215
@@ -63,7 +64,10 @@ while [ $# -gt 0 ]; do
     --interval-ms) OVERRIDES+=(BLOCK_INTERVAL_MS "$2");; --mode) OVERRIDES+=(MINING_MODE "$2");;
     --rpc-bind) OVERRIDES+=(RPC_BIND "$2");; --p2p-bind) OVERRIDES+=(P2P_BIND "$2");;
     --miner-cpu) OVERRIDES+=(MINER_CPU "$2");;
-    --pow) OVERRIDES+=(POW_ALGO "$2");;
+    --pow)
+      value=$2
+      case "$value" in Dummy) value=dummy;; Eaglesong) value=eaglesong;; esac
+      OVERRIDES+=(POW_ALGO "$value");;
     --node) NODE=$2;; --role) ROLE=$2;; --blocks) BLOCKS=$2;; --timeout) TIMEOUT=$2;;
     *) die "Unknown option: $1";;
   esac
@@ -345,6 +349,9 @@ init_node() {
     # Freeze a shared timestamp once; later nodes copy these exact bytes.
     awk -v ts="$(date +%s)000" -v pow="$POW_ALGO" '
       /^\[/ { section=$0 }
+      # Eaglesong uses CKB defaults: discard all params, including subtables.
+      pow=="eaglesong" && /^\[params\]/ { print "[params]\n"; next }
+      pow=="eaglesong" && section ~ /^\[params(\]|\.)/ { next }
       section=="[genesis]" && /^timestamp[[:space:]]*=/ { print "timestamp = " ts; next }
       section=="[params]" && /^permanent_difficulty_in_dummy[[:space:]]*=/ { next }
       pow=="dummy" && section=="[params]" && /^genesis_epoch_length[[:space:]]*=/ { next }
