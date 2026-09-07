@@ -4,19 +4,21 @@ A single-file Bash script for running a local CKB cluster. Requires `ckb`, `curl
 
 ## Quick Start
 
-Run these commands from the repository directory. Download CKB first, then pass the returned binary path to the cluster script. The downloader does not add CKB to PATH, and the cluster script does not download it automatically.
+Run these commands from the repository directory. The cluster automatically finds CKB downloaded into this project's `bin/ckb/` directory; no `CKB_BIN` configuration, PATH changes, or `--ckb` argument are needed.
 
 ```bash
-# Download and verify CKB, then start 2 miner nodes + 2 sync nodes in tmp/.
-# Stop immediately if downloading or checking the binary fails.
-CKB_BIN=$(./download-ckb.sh) &&
-  "$CKB_BIN" --version &&
-  ./ckb-cluster.sh up --ckb "$CKB_BIN"
+# Download once (skip this step if already downloaded).
+bash download-ckb.sh && bash ckb-cluster.sh up
+
+# Subsequent starts, including after cleaning the cluster:
+bash ckb-cluster.sh up
 ```
+
+For a new cluster, `--ckb` overrides `CKB_BIN`; otherwise the script uses a local download matching the current OS/architecture (including portable builds), and prompts you to run `./download-ckb.sh` or specify `--ckb /absolute/path/to/ckb` if none is found. It does not silently fall back to a CKB installation in PATH. If multiple matching downloads exist, it lists them and requires `--ckb` rather than guessing a version. Downloads are not triggered automatically.
 
 To select a specific release, pass its version to the downloader, for example `./download-ckb.sh v0.209.0`. If CKB is already installed, skip the download and run `./ckb-cluster.sh up --ckb /absolute/path/to/ckb`.
 
-The initialized cluster saves the binary path in `tmp/cluster.env`. Subsequent commands, including `./ckb-cluster.sh up` after stopping the cluster, reuse that path; no repeated download or `--ckb` argument is needed as long as the binary remains available. After cleaning the cluster, repeat the quick-start commands to initialize it again.
+The initialized cluster saves the binary path in `tmp/cluster.env`. Subsequent commands, including `./ckb-cluster.sh up` after stopping the cluster, reuse that path; no repeated download or `--ckb` argument is needed as long as the binary remains available. After cleaning the cluster, run `bash ckb-cluster.sh up` to reuse the local download. A saved binary path remains pinned; a missing explicit or saved binary is an error, not a reason to switch versions.
 
 ## Managing the Cluster
 
@@ -62,9 +64,7 @@ Locally verified with CKB 0.204.0. The script uses CLI arguments verified on the
 ./download-ckb.sh                         # Query the latest stable GitHub release; detect OS/architecture
 ./download-ckb.sh v0.209.0                 # Select a version; the v prefix is optional
 ./download-ckb.sh --version 0.209.0 --print-url
-CKB_BIN=$(./download-ckb.sh) &&
-  "$CKB_BIN" --version &&
-  ./ckb-cluster.sh up --root tmp-new --ckb "$CKB_BIN"
+./download-ckb.sh && ./ckb-cluster.sh up --root tmp-new
 ```
 
 Binaries are installed at `bin/ckb/<version>/<platform>/ckb`. The downloader verifies the GitHub release asset's SHA256 digest and saves a verification receipt. Repeated downloads revalidate the existing binary without overwriting it. Supported platforms are macOS/Linux on x86_64/aarch64, with `--portable` support when a matching release asset is available. No Python dependency is required. The script does not modify PATH or upgrade running clusters. For older release assets without a GitHub SHA256 digest, supply `--sha256` from a trusted source.

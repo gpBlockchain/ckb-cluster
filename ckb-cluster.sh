@@ -15,7 +15,7 @@ Commands:
   clean --force        stop ALL nodes, then delete only the cluster root
 Options:
   --root DIR             Default: tmp under this script's directory
-  --ckb PATH             Default: CKB_BIN environment variable or ckb
+  --ckb PATH             Default: local download (CKB_BIN override supported)
   --miners N --syncs M    Default: 2 + 2; set during init
   --mode MODE            solo (default), staggered, race, ondemand
   --interval-ms N        Default: 8000
@@ -33,7 +33,7 @@ case "$CMD" in init|up|down|status|add-node|pause-mining|resume-mining|mine|logs
 PROJECT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 ROOT=${CLUSTER_ROOT:-$PROJECT_DIR/tmp}
 MINERS=2 SYNCS=2 RPC_BASE=18114 P2P_BASE=18215 BLOCK_INTERVAL_MS=8000 MINING_MODE=solo
-CKB_BIN=${CKB_BIN:-ckb}
+CKB_BIN=${CKB_BIN:-}
 LOCK_ARG=0x0000000000000000000000000000000000000000
 GENESIS_MESSAGE=ckb-cluster-dev
 NODE=all ROLE=sync BLOCKS=1 TIMEOUT=60 FORCE=0 FOLLOW=0
@@ -86,9 +86,32 @@ case "$ROLE" in miner|sync) ;; *) die 'Invalid role';; esac
 
 save_env() { for key in $KEYS; do printf '%s=%s\n' "$key" "${!key}"; done > "$ROOT/cluster.env"; }
 need_ckb() {
-  CKB_BIN=$(command -v "$CKB_BIN") || die 'ckb not found; set --ckb'
+  # Resolve defaults only when neither the environment, saved config nor --ckb
+  # selected a binary. Never silently replace a pinned or explicit binary.
+  if [ -z "$CKB_BIN" ]; then
+    local arch target candidate
+    local candidates=()
+    arch=$(uname -m)
+    case "$arch" in arm64|aarch64) arch=aarch64;; amd64) arch=x86_64;; esac
+    case "$(uname -s)" in
+      Darwin) target="$arch-apple-darwin";;
+      Linux) target="$arch-unknown-linux-gnu";;
+      *) target=unsupported;;
+    esac
+    for candidate in "$PROJECT_DIR"/bin/ckb/*/"$target"/ckb "$PROJECT_DIR"/bin/ckb/*/"$target-portable"/ckb; do
+      [ ! -x "$candidate" ] || [ ! -f "$candidate" ] || candidates+=("$candidate")
+    done
+    case "${#candidates[@]}" in
+      0) die 'No downloaded CKB for this platform; run ./download-ckb.sh or specify --ckb /absolute/path/to/ckb';;
+      1) CKB_BIN=${candidates[0]};;
+      *) printf 'Downloaded CKB candidates:\n' >&2
+         printf '  %s\n' "${candidates[@]}" >&2
+         die 'Multiple local CKB binaries; select one with --ckb';;
+    esac
+  fi
+  CKB_BIN=$(command -v "$CKB_BIN") || die 'ckb not found; run bash download-ckb.sh or set --ckb'
   CKB_BIN=$(realpath "$CKB_BIN")
-  "$CKB_BIN" --version >/dev/null
+  "$CKB_BIN" --version >/dev/null || die "Selected CKB failed --version: $CKB_BIN; download it again or specify --ckb /absolute/path/to/ckb"
 }
 # Never source configuration or state; state is TSV: id role rpc p2p peer_id.
 rows() { cat "$ROOT/cluster.state"; }
