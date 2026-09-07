@@ -1,6 +1,6 @@
 # CKB Local Multi-Node Cluster
 
-Bash scripts for running a local CKB cluster. Requires `ckb`, `curl`, `jq`, `awk`, `lsof`, and `realpath`. No Python dependency.
+Bash scripts for running a local CKB cluster. Requires `ckb`, `curl`, `jq`, `awk`, `lsof`, and `realpath`. Python 3.8+ is required only for paced Eaglesong mining (enabled by default with `--pow eaglesong`). Dummy and unpaced Eaglesong do not require Python.
 
 ## Quick Start
 
@@ -62,8 +62,21 @@ New clusters default to **`--rpc-bind 0.0.0.0 --p2p-bind 0.0.0.0`**, allowing ac
 ```
 
 - **Dummy:** the chain uses `Dummy` PoW and miners use `Dummy` / `Constant` workers. `--interval-ms` controls the simulated delay (default: 8000 ms).
-- **Eaglesong:** the chain uses `Eaglesong` PoW and each mining process runs an `EaglesongSimple` worker with **one CPU thread**. The initial compact target and epoch settings come from the downloaded CKB's dev spec; the Dummy-only fixed-difficulty setting is removed. Real mining consumes CPU, difficulty can adjust, and block times are probabilistic rather than fixed. `--timeout` bounds the startup wait for four new blocks (default: 60 seconds); startup failure preserves the nodes and data, so use `down` to stop them.
-- Both algorithms support all four scheduling modes. `solo` runs only `miner-0`; `race` runs all miners; `ondemand` starts mining only on `mine`. With Eaglesong, `staggered` only spaces out miner startup using `--interval-ms`; it does not impose a per-block delay or strict turn-taking. On-demand mining may exceed the requested block count with either algorithm.
+- **Eaglesong:** the chain uses `Eaglesong` PoW and each mining process runs an `EaglesongSimple` worker with **one CPU thread**. The initial compact target and epoch settings come from the downloaded CKB's dev spec; the Dummy-only fixed-difficulty setting is removed. By default, a loopback-only template gate makes `--interval-ms 8000` effective: it waits 8 seconds after observing each new chain tip (including the first tip after startup), then re-fetches an unmodified template for real PoW. It also handles the miner's immediate template fetch after submission, so increasing `poll_interval` alone is not the implementation. PoW computation adds variable time; this is local test pacing, not an exact timer or a consensus difficulty target. Neither timestamps nor PoW rules are changed. Waiting uses a monotonic clock, not the node's cached template timestamp; header timestamps can lag publication, especially immediately after startup or resume. `--timeout` bounds the startup wait for four new blocks (default: 60 seconds); startup failure preserves the nodes and data, so use `down` to stop them.
+- Both algorithms support all four scheduling modes. `solo` runs only `miner-0`; `race` runs all miners; `ondemand` starts mining only on `mine`. With paced Eaglesong, each local miner gates templates after observing a new tip; `staggered` additionally spaces out startup, without strict turn-taking. Competing miners may still produce sibling blocks. External miners using the node RPC directly bypass pacing and can make the chain advance faster. On-demand mining may exceed the requested block count with either algorithm.
+- Use `--eaglesong-pacing off` for natural PoW with no per-block waiting; low initial dev difficulty can then produce blocks much faster than 8 seconds. Pacing is saved as `EAGLESONG_PACING=on|off` (default: `on`). It applies to all Eaglesong scheduling modes, including `mine`; Dummy ignores it.
+- Python 3.8+ is required for pacing, using only its standard library. Missing Python produces an installation/disable hint rather than silently mining too fast. The gate listens on a dynamically allocated **127.0.0.1-only** port, independently of the node's external RPC binding. Its supervisor stops the miner if the gate exits; pause/down also remove the gate and restore the miner's direct RPC URL. Gate logs are in `nodes/<id>/logs/pacer.log`.
+- CPU limiting still applies to the real miner process. The node and template gate are not CPU-capped. A higher difficulty or lower CPU budget may make intervals longer than requested; increase `--timeout` when needed.
+- To apply pacing to an existing Eaglesong cluster after updating the scripts (no chain reset needed), pause all miners, then resume. To change the interval, stop the cluster and edit `BLOCK_INTERVAL_MS` in `cluster.env`.
+
+```bash
+./ckb-cluster.sh pause-mining --root tmp-eaglesong
+./ckb-cluster.sh resume-mining --root tmp-eaglesong --eaglesong-pacing on
+# To disable pacing later, pause all miners first:
+./ckb-cluster.sh pause-mining --root tmp-eaglesong
+./ckb-cluster.sh resume-mining --root tmp-eaglesong --eaglesong-pacing off
+```
+
 - The selected algorithm is saved as `POW_ALGO` in `cluster.env` and must agree with the shared chain spec. Changing algorithms requires a **new `--root`**; editing `POW_ALGO` does not convert an existing chain. Existing cluster commands reuse the saved algorithm without repeating `--pow`.
 
 Configuration reference: [CKB's dev-chain miner guide](https://github.com/nervosnetwork/ckb/blob/develop/docs/dev-miner.md).
@@ -159,6 +172,8 @@ bash tests/default-ckb.sh
 bash tests/pow.sh
 bash tests/bind.sh
 bash tests/miner-cpu.sh
+bash tests/pacing.sh
+PYTHONDONTWRITEBYTECODE=1 python3 tests/eaglesong-pacer.py
 ```
 
 These tests use local fixtures and do not start nodes or download binaries.
