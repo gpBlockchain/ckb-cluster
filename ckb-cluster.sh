@@ -21,8 +21,7 @@ Options:
   --miner-cpu N          0 (default): unlimited; 1..100: percent of one CPU core
                         Optional cpulimit; missing tool warns and runs unlimited.
   --pow ALGORITHM        dummy (default) or eaglesong; immutable per cluster
-  --interval-ms N        Default: 8000; Dummy delay / Eaglesong template pacing
-  --eaglesong-pacing MODE on (default) or off; on requires Python 3.8+
+  --interval-ms N        Default: 8000; Dummy delay / staggered startup spacing
   --timeout N            Default: 60 seconds; mine or Eaglesong startup
   --rpc-base N --p2p-base N  Default: 18114 / 18215
   --rpc-bind ADDRESS     0.0.0.0 (default) or 127.0.0.1
@@ -30,8 +29,7 @@ Options:
                         Stop all cluster processes before changing bindings.
 Configuration: edit cluster.env while stopped (plain KEY=value, not shell).
 Dummy uses Constant delays; Eaglesong uses one CPU thread per miner.
-Paced Eaglesong waits after observing each new tip, then performs real PoW.
-External miners bypass pacing; natural PoW/race have no interval guarantee.
+Eaglesong/race have no interval guarantee; staggered is only heuristic.
 mine watches main-chain height, may overshoot; nonce --limit is NOT height +K.
 EOF
 }
@@ -43,8 +41,8 @@ case "$CMD" in init|up|down|status|add-node|pause-mining|resume-mining|mine|logs
 PROJECT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 ROOT=${CLUSTER_ROOT:-$PROJECT_DIR/tmp}
 MINERS=2 SYNCS=2 RPC_BASE=18114 P2P_BASE=18215 BLOCK_INTERVAL_MS=8000 MINING_MODE=solo
-MINER_CPU=0 CPU_EFFECTIVE=0 CPU_PREPARED=0 CPULIMIT_BIN='' PACING_PYTHON=''
-POW_ALGO=dummy EAGLESONG_PACING=on
+MINER_CPU=0 CPU_EFFECTIVE=0 CPU_PREPARED=0 CPULIMIT_BIN=''
+POW_ALGO=dummy
 RPC_BIND=0.0.0.0 P2P_BIND=0.0.0.0
 CKB_BIN=${CKB_BIN:-}
 LOCK_ARG=0x0000000000000000000000000000000000000000
@@ -66,7 +64,6 @@ while [ $# -gt 0 ]; do
     --rpc-bind) OVERRIDES+=(RPC_BIND "$2");; --p2p-bind) OVERRIDES+=(P2P_BIND "$2");;
     --miner-cpu) OVERRIDES+=(MINER_CPU "$2");;
     --pow) OVERRIDES+=(POW_ALGO "$2");;
-    --eaglesong-pacing) OVERRIDES+=(EAGLESONG_PACING "$2");;
     --node) NODE=$2;; --role) ROLE=$2;; --blocks) BLOCKS=$2;; --timeout) TIMEOUT=$2;;
     *) die "Unknown option: $1";;
   esac
@@ -76,7 +73,7 @@ for dep in jq curl awk lsof realpath; do command -v "$dep" >/dev/null || die "Mi
 ROOT=$(realpath "$ROOT")
 case "$ROOT" in /|"$HOME"|"$PROJECT_DIR"|*$'\n'*|*$'\r'*|*$'\t'*) die 'Choose a dedicated cluster subdirectory';; esac
 case "$PROJECT_DIR/" in "$ROOT/"*) die 'Root must not contain the project';; esac
-KEYS='MINERS SYNCS RPC_BASE P2P_BASE BLOCK_INTERVAL_MS MINING_MODE POW_ALGO EAGLESONG_PACING RPC_BIND P2P_BIND MINER_CPU CKB_BIN LOCK_ARG GENESIS_MESSAGE'
+KEYS='MINERS SYNCS RPC_BASE P2P_BASE BLOCK_INTERVAL_MS MINING_MODE POW_ALGO RPC_BIND P2P_BIND MINER_CPU CKB_BIN LOCK_ARG GENESIS_MESSAGE'
 if [ -f "$ROOT/cluster.env" ]; then
   while IFS='=' read -r key value; do
     case "$key" in ''|'#'*) continue;; esac
@@ -91,7 +88,7 @@ for ((i=0; i<${#OVERRIDES[@]}; i+=2)); do
     fi
     if [ "${!key}" != "$value" ]; then
       case "$key" in
-        MINER_CPU|EAGLESONG_PACING) case "$CMD" in up|resume-mining|mine) ;; *) die 'Change CPU/pacing with up, resume-mining, or mine after pausing miners';; esac;;
+        MINER_CPU) case "$CMD" in up|resume-mining|mine) ;; *) die 'Change --miner-cpu with up, resume-mining, or mine after pausing miners';; esac;;
         RPC_BIND|P2P_BIND) [ "$CMD" = up ] || die 'Change bindings with up after stopping all cluster processes';;
         *) die 'Existing cluster: edit cluster.env while stopped; topology/ports require re-init';;
       esac
@@ -107,7 +104,6 @@ done
 [ "$BLOCK_INTERVAL_MS" -gt 0 ] && [ "$BLOCKS" -gt 0 ] && [ "$TIMEOUT" -gt 0 ] || die 'Interval/blocks/timeout must be positive'
 case "$MINING_MODE" in solo|staggered|race|ondemand) ;; *) die 'Invalid mining mode';; esac
 case "$POW_ALGO" in dummy|eaglesong) ;; *) die 'Invalid PoW algorithm; use --pow dummy|eaglesong';; esac
-case "$EAGLESONG_PACING" in on|off) ;; *) die '--eaglesong-pacing must be on or off';; esac
 for key in RPC_BIND P2P_BIND; do
   case "${!key}" in 127.0.0.1|0.0.0.0) ;; *) die "$key must be 127.0.0.1 or 0.0.0.0";; esac
 done
@@ -212,22 +208,13 @@ stop_pid() {
   fi
   if [ "$(basename "$file")" = miner.pid ]; then
     /bin/bash "$PROJECT_DIR/miner-runner.sh" cleanup "$(dirname "$file")"
-    rm -f "$(dirname "$file")/miner.cpu-limit" "$(dirname "$file")/miner.pacing-ms" "$(dirname "$file")/miner.python"
+    rm -f "$(dirname "$file")/miner.cpu-limit"
   fi
   rm -f "$file"
-}
-pacing_ms() {
-  if [ "$POW_ALGO" = eaglesong ] && [ "$EAGLESONG_PACING" = on ]; then
-    echo "$BLOCK_INTERVAL_MS"
-  else echo 0; fi
 }
 prepare_miner_cpu() {
   [ "$CPU_PREPARED" = 0 ] || return 0
   CPU_EFFECTIVE=0
-  if [ "$(pacing_ms)" -gt 0 ]; then
-    PACING_PYTHON=$(python3 -c 'import os, sys; assert sys.version_info >= (3, 8); print(os.path.realpath(sys.executable))') ||
-      die 'Eaglesong pacing requires Python 3.8+; install python3 or select --eaglesong-pacing off'
-  fi
   if [ "$MINER_CPU" -gt 0 ]; then
     if [ -x "$PROJECT_DIR/bin/cpulimit/cpulimit" ]; then
       CPULIMIT_BIN="$PROJECT_DIR/bin/cpulimit/cpulimit"
@@ -248,7 +235,7 @@ prepare_miner_cpu() {
       log 'WARN: cpulimit is not installed; CPU limiting is DISABLED (miners will run unlimited). Install: ./install-cpulimit.sh (macOS), or sudo apt install cpulimit (Debian/Ubuntu)'
     fi
   fi
-  local id r rp pp peer active active_pacing
+  local id r rp pp peer active
   if [ -f "$ROOT/cluster.state" ]; then
     while read -r id r rp pp peer; do
       [ "$r" = miner ] || continue
@@ -256,9 +243,6 @@ prepare_miner_cpu() {
         active=0
         [ ! -f "$ROOT/nodes/$id/miner.cpu-limit" ] || read -r active < "$ROOT/nodes/$id/miner.cpu-limit"
         [ "$active" = "$CPU_EFFECTIVE" ] || die 'Pause all miners before changing the effective CPU limit'
-        active_pacing=0
-        [ ! -f "$ROOT/nodes/$id/miner.pacing-ms" ] || read -r active_pacing < "$ROOT/nodes/$id/miner.pacing-ms"
-        [ "$active_pacing" = "$(pacing_ms)" ] || die 'Pause all miners before changing Eaglesong pacing'
       fi
     done < "$ROOT/cluster.state"
   fi
@@ -271,9 +255,7 @@ launch() {
   if [ "$kind" = miner ]; then
     /bin/bash "$PROJECT_DIR/miner-runner.sh" cleanup "$DIR"
     printf '%s\n' "$CPU_EFFECTIVE" > "$DIR/miner.cpu-limit"
-    pacing_ms > "$DIR/miner.pacing-ms"
-    printf '%s\n' "$PACING_PYTHON" > "$DIR/miner.python"
-    if [ "$CPU_EFFECTIVE" -gt 0 ] || [ "$(pacing_ms)" -gt 0 ]; then
+    if [ "$CPU_EFFECTIVE" -gt 0 ]; then
       command=(/bin/bash "$PROJECT_DIR/miner-runner.sh" run "$CPU_EFFECTIVE" "$CPULIMIT_BIN" "$CKB_BIN" --node-dir "$DIR")
     fi
   fi
@@ -338,7 +320,6 @@ color = false
 [sentry]
 dsn = ""
 [miner.client]
-# upstream_rpc_url = "http://127.0.0.1:$RP/"
 rpc_url = "http://127.0.0.1:$RP/"
 block_on_submit = true
 poll_interval = 100
@@ -499,9 +480,7 @@ intervals() {
   if [ "$count" -gt 0 ]; then
     if [ "$POW_ALGO" = eaglesong ]; then
       echo "average_interval_ms=$((sum/count)) pow=$POW_ALGO mode=$MINING_MODE"
-      if [ "$EAGLESONG_PACING" = on ]; then
-        echo "INFO: local template pacing target_ms=$BLOCK_INTERVAL_MS; PoW adds variable time, external miners bypass pacing"
-      else echo 'INFO: Eaglesong uses real CPU PoW; block intervals are probabilistic'; fi
+      echo 'INFO: Eaglesong uses real CPU PoW; block intervals are probabilistic'
       return
     fi
     echo "average_interval_ms=$((sum/count)) target_ms=$BLOCK_INTERVAL_MS mode=$MINING_MODE"
@@ -511,7 +490,7 @@ intervals() {
 }
 status() {
   local id r rp pp peer tip peers base h np mp cap worker failed=0
-  echo "time=$(date -u +%FT%TZ) mode=$MINING_MODE pow=$POW_ALGO eaglesong_pacing=$EAGLESONG_PACING rpc_bind=$RPC_BIND p2p_bind=$P2P_BIND miner_cpu_requested=$MINER_CPU miners=$MINERS syncs=$SYNCS root=$ROOT"
+  echo "time=$(date -u +%FT%TZ) mode=$MINING_MODE pow=$POW_ALGO rpc_bind=$RPC_BIND p2p_bind=$P2P_BIND miner_cpu_requested=$MINER_CPU miners=$MINERS syncs=$SYNCS root=$ROOT"
   base=$(height miner-0 2>/dev/null) || base=0
   while read -r id r rp pp peer; do
     np=- mp=- cap=- worker=-; lookup "$id"
