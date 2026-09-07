@@ -2,8 +2,25 @@
 
 A single-file Bash script for running a local CKB cluster. Requires `ckb`, `curl`, `jq`, `awk`, `lsof`, and `realpath`. No Python dependency.
 
+## Quick Start
+
+Run these commands from the repository directory. Download CKB first, then pass the returned binary path to the cluster script. The downloader does not add CKB to PATH, and the cluster script does not download it automatically.
+
 ```bash
-./ckb-cluster.sh up               # Start 2 miner nodes + 2 sync nodes in this project's tmp/ by default
+# Download and verify CKB, then start 2 miner nodes + 2 sync nodes in tmp/.
+# Stop immediately if downloading or checking the binary fails.
+CKB_BIN=$(./download-ckb.sh) &&
+  "$CKB_BIN" --version &&
+  ./ckb-cluster.sh up --ckb "$CKB_BIN"
+```
+
+To select a specific release, pass its version to the downloader, for example `./download-ckb.sh v0.209.0`. If CKB is already installed, skip the download and run `./ckb-cluster.sh up --ckb /absolute/path/to/ckb`.
+
+The initialized cluster saves the binary path in `tmp/cluster.env`. Subsequent commands, including `./ckb-cluster.sh up` after stopping the cluster, reuse that path; no repeated download or `--ckb` argument is needed as long as the binary remains available. After cleaning the cluster, repeat the quick-start commands to initialize it again.
+
+## Managing the Cluster
+
+```bash
 ./ckb-cluster.sh status           # PID, RPC/P2P, peer ID, connection count, height/hash, block interval
 ./ckb-cluster.sh pause-mining     # Stop mining processes only; nodes keep running
 ./ckb-cluster.sh resume-mining
@@ -45,9 +62,9 @@ Locally verified with CKB 0.204.0. The script uses CLI arguments verified on the
 ./download-ckb.sh                         # Query the latest stable GitHub release; detect OS/architecture
 ./download-ckb.sh v0.209.0                 # Select a version; the v prefix is optional
 ./download-ckb.sh --version 0.209.0 --print-url
-CKB_BIN=$(./download-ckb.sh)
-"$CKB_BIN" --version
-./ckb-cluster.sh up --root tmp-new --ckb "$CKB_BIN"
+CKB_BIN=$(./download-ckb.sh) &&
+  "$CKB_BIN" --version &&
+  ./ckb-cluster.sh up --root tmp-new --ckb "$CKB_BIN"
 ```
 
 Binaries are installed at `bin/ckb/<version>/<platform>/ckb`. The downloader verifies the GitHub release asset's SHA256 digest and saves a verification receipt. Repeated downloads revalidate the existing binary without overwriting it. Supported platforms are macOS/Linux on x86_64/aarch64, with `--portable` support when a matching release asset is available. No Python dependency is required. The script does not modify PATH or upgrade running clusters. For older release assets without a GitHub SHA256 digest, supply `--sha256` from a trusted source.
