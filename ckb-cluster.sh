@@ -22,6 +22,9 @@ Options:
   --interval-ms N        Default: 8000; Dummy delay / staggered startup spacing
   --timeout N            Default: 60 seconds; mine or Eaglesong startup
   --rpc-base N --p2p-base N  Default: 18114 / 18215
+  --rpc-bind ADDRESS     0.0.0.0 (default) or 127.0.0.1
+  --p2p-bind ADDRESS     0.0.0.0 (default) or 127.0.0.1
+                        Stop all cluster processes before changing bindings.
 Configuration: edit cluster.env while stopped (plain KEY=value, not shell).
 Dummy uses Constant delays; Eaglesong uses one CPU thread per miner.
 Eaglesong/race have no interval guarantee; staggered is only heuristic.
@@ -37,6 +40,7 @@ PROJECT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 ROOT=${CLUSTER_ROOT:-$PROJECT_DIR/tmp}
 MINERS=2 SYNCS=2 RPC_BASE=18114 P2P_BASE=18215 BLOCK_INTERVAL_MS=8000 MINING_MODE=solo
 POW_ALGO=dummy
+RPC_BIND=0.0.0.0 P2P_BIND=0.0.0.0
 CKB_BIN=${CKB_BIN:-}
 LOCK_ARG=0x0000000000000000000000000000000000000000
 GENESIS_MESSAGE=ckb-cluster-dev
@@ -54,6 +58,7 @@ while [ $# -gt 0 ]; do
     --miners) OVERRIDES+=(MINERS "$2");; --syncs) OVERRIDES+=(SYNCS "$2");;
     --rpc-base) OVERRIDES+=(RPC_BASE "$2");; --p2p-base) OVERRIDES+=(P2P_BASE "$2");;
     --interval-ms) OVERRIDES+=(BLOCK_INTERVAL_MS "$2");; --mode) OVERRIDES+=(MINING_MODE "$2");;
+    --rpc-bind) OVERRIDES+=(RPC_BIND "$2");; --p2p-bind) OVERRIDES+=(P2P_BIND "$2");;
     --pow) OVERRIDES+=(POW_ALGO "$2");;
     --node) NODE=$2;; --role) ROLE=$2;; --blocks) BLOCKS=$2;; --timeout) TIMEOUT=$2;;
     *) die "Unknown option: $1";;
@@ -64,7 +69,7 @@ for dep in jq curl awk lsof realpath; do command -v "$dep" >/dev/null || die "Mi
 ROOT=$(realpath "$ROOT")
 case "$ROOT" in /|"$HOME"|"$PROJECT_DIR"|*$'\n'*|*$'\r'*|*$'\t'*) die 'Choose a dedicated cluster subdirectory';; esac
 case "$PROJECT_DIR/" in "$ROOT/"*) die 'Root must not contain the project';; esac
-KEYS='MINERS SYNCS RPC_BASE P2P_BASE BLOCK_INTERVAL_MS MINING_MODE POW_ALGO CKB_BIN LOCK_ARG GENESIS_MESSAGE'
+KEYS='MINERS SYNCS RPC_BASE P2P_BASE BLOCK_INTERVAL_MS MINING_MODE POW_ALGO RPC_BIND P2P_BIND CKB_BIN LOCK_ARG GENESIS_MESSAGE'
 if [ -f "$ROOT/cluster.env" ]; then
   while IFS='=' read -r key value; do
     case "$key" in ''|'#'*) continue;; esac
@@ -77,7 +82,12 @@ for ((i=0; i<${#OVERRIDES[@]}; i+=2)); do
     if [ "$key" = POW_ALGO ] && [ "$POW_ALGO" != "$value" ]; then
       die 'PoW is immutable for an initialized cluster; use a new --root'
     fi
-    [ "${!key}" = "$value" ] || die "Existing cluster: edit cluster.env while stopped; topology/ports require re-init"
+    if [ "${!key}" != "$value" ]; then
+      case "$key" in
+        RPC_BIND|P2P_BIND) [ "$CMD" = up ] || die 'Change bindings with up after stopping all cluster processes';;
+        *) die 'Existing cluster: edit cluster.env while stopped; topology/ports require re-init';;
+      esac
+    fi
   fi
   printf -v "$key" '%s' "$value"
 done
@@ -89,6 +99,9 @@ done
 [ "$BLOCK_INTERVAL_MS" -gt 0 ] && [ "$BLOCKS" -gt 0 ] && [ "$TIMEOUT" -gt 0 ] || die 'Interval/blocks/timeout must be positive'
 case "$MINING_MODE" in solo|staggered|race|ondemand) ;; *) die 'Invalid mining mode';; esac
 case "$POW_ALGO" in dummy|eaglesong) ;; *) die 'Invalid PoW algorithm; use --pow dummy|eaglesong';; esac
+for key in RPC_BIND P2P_BIND; do
+  case "${!key}" in 127.0.0.1|0.0.0.0) ;; *) die "$key must be 127.0.0.1 or 0.0.0.0";; esac
+done
 case "$ROLE" in miner|sync) ;; *) die 'Invalid role';; esac
 [[ "$NODE" =~ ^(all|miner-[0-9]+|sync-[0-9]+)$ ]] || die 'Invalid node ID'
 [[ "$LOCK_ARG" =~ ^0x[0-9a-fA-F]{40}$ ]] || die 'LOCK_ARG must be 20 bytes'
@@ -295,10 +308,11 @@ init_node() {
     read -r bp bpeer <<< "$(awk '$1=="miner-0"{print $4,$5}' "$ROOT/cluster.state")"
     boot="[\"/ip4/127.0.0.1/tcp/$bp/p2p/$bpeer\"]"
   fi
-  awk -v port="$pp" -v boot="$boot" -v role="$role" '
-    /^\[/ { skip=(role=="sync" && $0=="[block_assembler]") }
+  awk -v port="$pp" -v rpc_port="$rp" -v rpc_bind="$RPC_BIND" -v p2p_bind="$P2P_BIND" -v boot="$boot" -v role="$role" '
+    /^\[/ { section=$0; skip=(role=="sync" && $0=="[block_assembler]") }
     skip { next }
-    /^listen_addresses[[:space:]]*=/ { print "listen_addresses = [\"/ip4/127.0.0.1/tcp/" port "\"]"; next }
+    section=="[network]" && /^listen_addresses[[:space:]]*=/ { print "listen_addresses = [\"/ip4/" p2p_bind "/tcp/" port "\"]"; next }
+    section=="[rpc]" && /^listen_address[[:space:]]*=/ { print "listen_address = \"" rpc_bind ":" rpc_port "\""; next }
     /^bootnodes[[:space:]]*=/ { print "bootnodes = " boot; next }
     /^discovery_local_address[[:space:]]*=/ { print "discovery_local_address = true"; next }
     /^cache_size[[:space:]]*=/ { print "cache_size = 16777216"; next }
@@ -421,7 +435,7 @@ intervals() {
 }
 status() {
   local id r rp pp peer tip peers base h np mp failed=0
-  echo "time=$(date -u +%FT%TZ) mode=$MINING_MODE pow=$POW_ALGO miners=$MINERS syncs=$SYNCS root=$ROOT"
+  echo "time=$(date -u +%FT%TZ) mode=$MINING_MODE pow=$POW_ALGO rpc_bind=$RPC_BIND p2p_bind=$P2P_BIND miners=$MINERS syncs=$SYNCS root=$ROOT"
   base=$(height miner-0 2>/dev/null) || base=0
   while read -r id r rp pp peer; do
     np=- mp=-; lookup "$id"
@@ -443,6 +457,39 @@ snapshot() {
   } > "$out"
   log "Snapshot: $out"
 }
+# Rebind only after all processes are stopped. Prepare and validate every file
+# before replacing any of them; leave unrelated config sections unchanged.
+configure_bindings() {
+  local id r rp pp peer changed=0 rpc_addr p2p_addr
+  while read -r id r rp pp peer; do
+    lookup "$id"
+    rpc_addr=$(awk '/^\[/ {s=$0} s=="[rpc]" && /^listen_address[[:space:]]*=/ {split($0,a,"\"");print a[2]}' "$DIR/ckb.toml")
+    p2p_addr=$(awk '/^\[/ {s=$0} s=="[network]" && /^listen_addresses[[:space:]]*=/ {split($0,a,"\"");print a[2]}' "$DIR/ckb.toml")
+    [ "$rpc_addr" = "$RPC_BIND:$rp" ] && [ "$p2p_addr" = "/ip4/$P2P_BIND/tcp/$pp" ] || changed=1
+  done < "$ROOT/cluster.state"
+  if [ "$changed" = 1 ]; then
+    while read -r id r rp pp peer; do
+      lookup "$id"
+      if alive "$DIR/node.pid" || alive "$DIR/miner.pid"; then
+        die 'Stop all cluster processes with down before changing RPC/P2P bindings'
+      fi
+    done < "$ROOT/cluster.state"
+    while read -r id r rp pp peer; do
+      lookup "$id"
+      awk -v rpc="$RPC_BIND:$rp" -v p2p="/ip4/$P2P_BIND/tcp/$pp" '
+        /^\[/ {s=$0}
+        s=="[rpc]" && /^listen_address[[:space:]]*=/ {print "listen_address = \"" rpc "\"";nr++;next}
+        s=="[network]" && /^listen_addresses[[:space:]]*=/ {print "listen_addresses = [\"" p2p "\"]";np++;next}
+        {print}
+        END {if (nr!=1 || np!=1) exit 1}
+      ' "$DIR/ckb.toml" > "$DIR/ckb.toml.bind-next" || die "Invalid binding fields in $id config; original retained"
+    done < "$ROOT/cluster.state"
+    while read -r id r rp pp peer; do
+      lookup "$id"; mv "$DIR/ckb.toml.bind-next" "$DIR/ckb.toml"
+    done < "$ROOT/cluster.state"
+  fi
+  save_env
+}
 cmd_up() {
   local id r rp pp peer initial end wait_s
   [ -f "$ROOT/.ready" ] || cmd_init
@@ -456,6 +503,8 @@ cmd_up() {
     if ! alive "$DIR/node.pid"; then ports+=("$rp" "$pp"); fi
   done < "$ROOT/cluster.state"
   if [ "${#ports[@]}" -gt 0 ]; then free_ports "${ports[@]}"; fi
+  configure_bindings
+  if [ "$RPC_BIND" = 0.0.0.0 ]; then log 'RPC listens on all IPv4 interfaces; restrict access to trusted hosts with a firewall'; fi
   while read -r id r rp pp peer; do lookup "$id"; launch node run; done < "$ROOT/cluster.state"
   while read -r id r rp pp peer; do wait_rpc "$id"; done < "$ROOT/cluster.state"
   connect_peers

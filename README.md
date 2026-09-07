@@ -20,6 +20,32 @@ To select a specific release, pass its version to the downloader, for example `.
 
 The initialized cluster saves the binary path in `tmp/cluster.env`. Subsequent commands, including `./ckb-cluster.sh up` after stopping the cluster, reuse that path; no repeated download or `--ckb` argument is needed as long as the binary remains available. After cleaning the cluster, run `bash ckb-cluster.sh up` to reuse the local download. A saved binary path remains pinned; a missing explicit or saved binary is an error, not a reason to switch versions.
 
+## External Node Access
+
+New clusters default to **`--rpc-bind 0.0.0.0 --p2p-bind 0.0.0.0`**, allowing access through any reachable IPv4 interface. The two options are independent and accept `0.0.0.0` or `127.0.0.1`.
+
+```bash
+# Default: RPC and P2P listen on all IPv4 interfaces.
+./ckb-cluster.sh up
+
+# Keep RPC local while allowing external P2P connections (new cluster).
+./ckb-cluster.sh up --root tmp-external --rpc-bind 127.0.0.1 --p2p-bind 0.0.0.0 \
+  --rpc-base 19114 --p2p-base 19215
+
+# Change an existing cluster only after stopping its nodes and miners.
+./ckb-cluster.sh down
+./ckb-cluster.sh up --rpc-bind 0.0.0.0 --p2p-bind 0.0.0.0
+
+# To return to local-only access, stop it and use both --*-bind 127.0.0.1.
+```
+
+- External clients must use the machine's reachable LAN/public IP, **not `0.0.0.0`**: RPC is `http://HOST_IP:18114`, and miner-0's P2P address is `/ip4/HOST_IP/tcp/18215/p2p/PEER_ID`. Get each node's ports and peer ID with `status`.
+- External CKB nodes need the same chain spec and genesis as this cluster: use the generated `tmp/shared/spec.toml` (or the corresponding custom root). Do not independently generate a different dev-chain genesis. Network private keys must remain unique; do not copy the cluster's network keys.
+- Open/forward the required TCP ports in the host firewall/router as appropriate. Binding all interfaces alone does not configure NAT, firewalls, or public-address advertisement.
+- **The generated dev RPC configuration exposes administrative/debug APIs without adding authentication. Limit RPC access to trusted hosts using firewall rules or an authenticated proxy; avoid exposing it directly to the public internet.** Set `--rpc-bind 127.0.0.1` when remote RPC is unnecessary.
+- Binding settings are persisted as `RPC_BIND` and `P2P_BIND`. If these fields are absent, both default to `0.0.0.0`. An attempted rebind while any cluster node/miner is running is rejected before configuration files change.
+- Internal RPC requests, miner RPC URLs, and local peer connections continue using `127.0.0.1`; wildcard addresses are only used for listening.
+
 ## Proof of Work and Mining Modes
 
 `--pow dummy|eaglesong` selects the consensus algorithm independently of `--mode solo|staggered|race|ondemand`. The default is `dummy`, preserving existing behavior and compatibility with older cluster configurations.
@@ -69,7 +95,7 @@ Both helper scripts support `--root DIR`. Cleanup deletes the selected cluster's
 
 - By default (`--pow dummy --mode solo`), only `miner-0` mines, using Dummy/Constant with a target block interval of approximately 8 seconds.
 - Before startup, the script checks ports for all nodes being started and checks for overlapping RPC/P2P port ranges. Consult node logs for actual bind failures.
-- RPC/P2P listens only on `127.0.0.1`. Default RPC ports are 18114–18117; P2P ports are 18215–18218.
+- New clusters bind RPC/P2P to `0.0.0.0` by default (all IPv4 interfaces). Default RPC ports are 18114–18117; P2P ports are 18215–18218. Restrict RPC access to trusted hosts with a firewall.
 - On startup, the script checks peer connections, genesis blocks, block hashes at a common height, and synchronization lag, then saves a baseline snapshot. Except in `ondemand` mode, it also waits for four new blocks.
 - `tmp/cluster.env` contains plain `KEY=value` entries; it is not executed as shell code. Run `down` before changing the mining mode or interval. Use a new `--root` when changing topology, ports, or genesis settings.
 - Supported modes: `--mode solo|staggered|race|ondemand`. Staggered mode uses heuristic scheduling; race mode does not guarantee a block interval.
@@ -98,6 +124,7 @@ On macOS, nodes are managed by launchd without creating startup jobs; `down` rem
 ```bash
 bash tests/default-ckb.sh
 bash tests/pow.sh
+bash tests/bind.sh
 ```
 
 These tests use local fixtures and do not start nodes or download binaries.
