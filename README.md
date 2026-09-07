@@ -1,55 +1,55 @@
-# CKB 本地多节点集群
+# CKB Local Multi-Node Cluster
 
-单文件 Bash 脚本。依赖：`ckb`、`curl`、`jq`、`awk`、`lsof`、`realpath`，无 Python 依赖。
+A single-file Bash script for running a local CKB cluster. Requires `ckb`, `curl`, `jq`, `awk`, `lsof`, and `realpath`. No Python dependency.
 
 ```bash
-./ckb-cluster.sh up               # 默认在本项目 tmp/ 中启动 2 miner + 2 sync
-./ckb-cluster.sh status           # PID、RPC/P2P、peer ID、连接数、高度/hash、出块间隔
-./ckb-cluster.sh pause-mining     # 只停矿工，节点继续运行
+./ckb-cluster.sh up               # Start 2 miner nodes + 2 sync nodes in this project's tmp/ by default
+./ckb-cluster.sh status           # PID, RPC/P2P, peer ID, connection count, height/hash, block interval
+./ckb-cluster.sh pause-mining     # Stop mining processes only; nodes keep running
 ./ckb-cluster.sh resume-mining
 ./ckb-cluster.sh add-node --role sync
 ./ckb-cluster.sh snapshot
 ./ckb-cluster.sh export
-./ckb-cluster.sh down             # 停止进程，保留数据
-./ckb-cluster.sh clean --force    # 停止并删除 tmp/，谨慎使用
+./ckb-cluster.sh down             # Stop processes and retain data
+./ckb-cluster.sh clean --force    # Stop the cluster and delete tmp/; use with care
 ```
 
-## 停节点和清环境
+## Stopping Nodes and Cleaning Up
 
 ```bash
-./stop-ckb.sh                       # 停全部节点和矿工，保留数据
-./stop-ckb.sh --node sync-0          # 只停 sync-0，其他节点不受影响
-./stop-ckb.sh --node miner-0         # 同时停止 miner-0 的节点和挖矿进程
-./ckb-cluster.sh up                 # 从保留的数据恢复集群
-./clean-ckb.sh --force              # 停全部节点后删除项目 tmp/ 环境
+./stop-ckb.sh                       # Stop all nodes and mining processes; retain data
+./stop-ckb.sh --node sync-0          # Stop only sync-0; leave other nodes running
+./stop-ckb.sh --node miner-0         # Stop both the miner-0 node and its mining process
+./ckb-cluster.sh up                 # Resume the cluster using retained data
+./clean-ckb.sh --force              # Stop all nodes, then delete the project's tmp/ environment
 ```
 
-两个入口均支持 `--root DIR`。清理会删除指定集群的数据库、配置、网络私钥、日志和快照，**保留下载的 `bin/ckb/`、脚本及其他项目文件**。没有 `--force` 时不清理；只接受带集群标记的专用目录。停止或清理后可重复调用。macOS 同时移除本集群对应的 launchd 任务；若进程停止失败，则保留数据并报错。
+Both helper scripts support `--root DIR`. Cleanup deletes the selected cluster's databases, configuration, network private keys, logs, and snapshots, while **preserving downloaded binaries in `bin/ckb/`, scripts, and other project files**. Cleanup requires `--force` and only accepts a dedicated directory with a cluster marker. Stop and cleanup commands can be called repeatedly. On macOS, the cluster's launchd jobs are also removed. If a process fails to stop, cleanup retains the data and reports an error.
 
-- 默认仅 `miner-0` 挖矿，Dummy/Constant 目标约 8 秒一块。
-- 启动前检查所有待启动节点的端口以及 RPC/P2P 端口段重叠；实际监听失败仍以节点日志为准。
-- RPC/P2P 仅监听 `127.0.0.1`。默认 RPC 为 18114–18117，P2P 为 18215–18218。
-- 首次启动检查四个新块、peer 连接、创世块、共同高度 hash 与同步差，并保存基线快照。
-- `tmp/cluster.env` 是纯 `KEY=value`，不执行 Shell 代码。修改模式/间隔前先 `down`；拓扑、端口及创世设置更改应使用新的 `--root`。
-- 支持 `--mode solo|staggered|race|ondemand`。staggered 为启发式错峰；race 不保证间隔。
-- 按需出块：新目录 `up --root tmp-demand --mode ondemand`，再 `mine --root tmp-demand --blocks 5 --timeout 60`。按高度观测停止，可能略超目标。
-- 所有节点使用同一份固化 spec 和创世时间；peer ID 独立。启动时固定 CKB 版本。
-- 日志在 `tmp/nodes/<id>/logs/`；快照和不含网络私钥/链数据库的导出包在 `tmp/evidence/`。
-- 命令通过目录锁串行执行；异常退出后的锁需先核查 `.lock/owner` 中进程，再手动移除。启动失败保留数据和已启动节点，可用 `down` 收尾。
+- By default, only `miner-0` mines, using Dummy/Constant with a target block interval of approximately 8 seconds.
+- Before startup, the script checks ports for all nodes being started and checks for overlapping RPC/P2P port ranges. Consult node logs for actual bind failures.
+- RPC/P2P listens only on `127.0.0.1`. Default RPC ports are 18114–18117; P2P ports are 18215–18218.
+- On first startup, the script checks four new blocks, peer connections, genesis blocks, block hashes at a common height, and synchronization lag, then saves a baseline snapshot.
+- `tmp/cluster.env` contains plain `KEY=value` entries; it is not executed as shell code. Run `down` before changing the mining mode or interval. Use a new `--root` when changing topology, ports, or genesis settings.
+- Supported modes: `--mode solo|staggered|race|ondemand`. Staggered mode uses heuristic scheduling; race mode does not guarantee a block interval.
+- On-demand mining: use a new directory with `up --root tmp-demand --mode ondemand`, then run `mine --root tmp-demand --blocks 5 --timeout 60`. Mining stops based on observed block height and may slightly exceed the target.
+- All nodes share the same fixed chain spec and genesis timestamp, with independent peer IDs. The CKB version is pinned at startup.
+- Logs are stored in `tmp/nodes/<id>/logs/`. Snapshots and export bundles are stored in `tmp/evidence/`; export bundles exclude network private keys and chain databases.
+- Commands are serialized using a directory lock. After an abnormal exit, check the process recorded in `.lock/owner` before manually removing the lock. Failed startup preserves data and any nodes already started; use `down` to stop them.
 
-本机验证版本：CKB 0.204.0。脚本采用本机实际 CLI 参数；RPC 接口参考 [CKB RPC 文档](https://github.com/nervosnetwork/ckb/blob/develop/rpc/README.md)。
+Locally verified with CKB 0.204.0. The script uses CLI arguments verified on the local installation. For RPC interfaces, see the [CKB RPC documentation](https://github.com/nervosnetwork/ckb/blob/develop/rpc/README.md).
 
-## 下载 CKB（默认最新版）
+## Downloading CKB (Latest Release by Default)
 
 ```bash
-./download-ckb.sh                         # 查询 GitHub 最新正式版，自动选择系统/架构
-./download-ckb.sh v0.209.0                 # 指定版本，省略 v 也支持
+./download-ckb.sh                         # Query the latest stable GitHub release; detect OS/architecture
+./download-ckb.sh v0.209.0                 # Select a version; the v prefix is optional
 ./download-ckb.sh --version 0.209.0 --print-url
 CKB_BIN=$(./download-ckb.sh)
 "$CKB_BIN" --version
 ./ckb-cluster.sh up --root tmp-new --ckb "$CKB_BIN"
 ```
 
-下载位置为 `bin/ckb/<版本>/<平台>/ckb`，校验 GitHub asset SHA256 后保存校验记录；重复下载会复核已存二进制，不覆盖。支持 macOS/Linux 的 x86_64/aarch64，以及存在对应资源时的 `--portable`。无 Python 依赖。不自动修改 PATH，也不升级正在运行的集群。老版本资源若没有 GitHub SHA256 digest，需传入可信来源的 `--sha256`。
+Binaries are installed at `bin/ckb/<version>/<platform>/ckb`. The downloader verifies the GitHub release asset's SHA256 digest and saves a verification receipt. Repeated downloads revalidate the existing binary without overwriting it. Supported platforms are macOS/Linux on x86_64/aarch64, with `--portable` support when a matching release asset is available. No Python dependency is required. The script does not modify PATH or upgrade running clusters. For older release assets without a GitHub SHA256 digest, supply `--sha256` from a trusted source.
 
-macOS 节点由 launchd 托管（不创建开机启动项），`down` 会移除对应任务；Linux 使用 nohup。
+On macOS, nodes are managed by launchd without creating startup jobs; `down` removes the corresponding jobs. Linux uses nohup.
