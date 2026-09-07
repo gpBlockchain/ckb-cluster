@@ -65,6 +65,7 @@ for pow in dummy eaglesong; do
     cmp "$dir/shared/spec.toml" "$dir/nodes/sync-0/specs/dev.toml"
     if [ "$pow" = dummy ]; then
       grep -qx 'func = "Dummy"' "$dir/shared/spec.toml"
+      grep -qx 'compact_target = 0x20010000' "$dir/shared/spec.toml"
       grep -qx 'permanent_difficulty_in_dummy = true' "$dir/shared/spec.toml"
       grep -qx 'genesis_epoch_length = 1000' "$dir/shared/spec.toml"
       grep -qx 'epoch_duration_target = 80' "$dir/shared/spec.toml"
@@ -85,7 +86,7 @@ for pow in dummy eaglesong; do
         END {if (found!=1 || duration!=1 || epoch_length_count!=1) exit 1}
       ' "$dir/shared/spec.toml"
       ! grep -Eq '^(cellbase_maturity|initial_primary_epoch_reward|permanent_difficulty_in_dummy|ckb2023)[[:space:]]*=' "$dir/shared/spec.toml"
-      grep -qx 'compact_target = 0x20010000' "$dir/shared/spec.toml"
+      grep -qx 'compact_target = 0x1e015555' "$dir/shared/spec.toml"
       grep -qx 'worker_type = "EaglesongSimple"' "$dir/nodes/miner-0/ckb-miner.toml"
       grep -qx 'threads = 1' "$dir/nodes/miner-0/ckb-miner.toml"
       ! grep -Eq '^(delay_type|value) =' "$dir/nodes/miner-0/ckb-miner.toml"

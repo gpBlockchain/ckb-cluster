@@ -349,9 +349,10 @@ init_node() {
     # Freeze a shared timestamp once; later nodes copy these exact bytes.
     awk -v ts="$(date +%s)000" -v pow="$POW_ALGO" '
       /^\[/ { section=$0 }
-      # Eaglesong overrides epoch timing only; discard other dev params and subtables.
+      # Eaglesong keeps only the epoch overrides in params; discard other dev params and subtables.
       pow=="eaglesong" && /^\[params\]/ { print "[params]\nepoch_duration_target = 14400\ngenesis_epoch_length = 1000\n"; next }
       pow=="eaglesong" && section ~ /^\[params(\]|\.)/ { next }
+      pow=="eaglesong" && section=="[genesis]" && /^compact_target[[:space:]]*=/ { print "compact_target = 0x1e015555"; next }
       section=="[genesis]" && /^timestamp[[:space:]]*=/ { print "timestamp = " ts; next }
       section=="[params]" && /^permanent_difficulty_in_dummy[[:space:]]*=/ { next }
       pow=="dummy" && section=="[params]" && /^genesis_epoch_length[[:space:]]*=/ { next }
