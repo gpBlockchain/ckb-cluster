@@ -7,7 +7,7 @@ usage() {
   cat <<'EOF'
 Usage: ./ckb-cluster.sh COMMAND [OPTIONS]
 Commands:
-  init | up | status | add-node --role miner|sync
+  init | up | status | add-node --role miner|sync|boot
   down [--node ID|all]  stop selected node(s) and their miners; retain data
   pause-mining [--node miner-N|all] | resume-mining
   mine [--node miner-N] [--blocks 1] [--timeout 60]  (ondemand only)
@@ -16,7 +16,7 @@ Commands:
 Options:
   --root DIR             Default: tmp under this script's directory
   --ckb PATH             Default: local download (CKB_BIN override supported)
-  --miners N --syncs M    Default: 2 + 2; set during init
+  --miners N --syncs M --boots B  Default: 2 + 2 + 0; set during init
   --mode MODE            solo (default), staggered, race, ondemand
   --miner-cpu N          0 (default): unlimited; 1..100: percent of one CPU core
                         Optional cpulimit; missing tool warns and runs unlimited.
@@ -41,7 +41,7 @@ case "$CMD" in help|-h|--help) usage; exit 0;; esac
 case "$CMD" in init|up|down|status|add-node|pause-mining|resume-mining|mine|logs|snapshot|export|clean) ;; *) die "Unknown command: $CMD";; esac
 PROJECT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 ROOT=${CLUSTER_ROOT:-$PROJECT_DIR/tmp}
-MINERS=2 SYNCS=2 RPC_BASE=18114 P2P_BASE=18215 BLOCK_INTERVAL_MS=8000 MINING_MODE=solo
+MINERS=2 SYNCS=2 BOOTS=0 RPC_BASE=18114 P2P_BASE=18215 BLOCK_INTERVAL_MS=8000 MINING_MODE=solo
 MINER_CPU=0 CPU_EFFECTIVE=0 CPU_PREPARED=0 CPULIMIT_BIN=''
 POW_ALGO=dummy
 RPC_BIND=0.0.0.0 P2P_BIND=0.0.0.0
@@ -60,6 +60,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --root) ROOT=$2;; --ckb) OVERRIDES+=(CKB_BIN "$2");;
     --miners) OVERRIDES+=(MINERS "$2");; --syncs) OVERRIDES+=(SYNCS "$2");;
+    --boots) OVERRIDES+=(BOOTS "$2");;
     --rpc-base) OVERRIDES+=(RPC_BASE "$2");; --p2p-base) OVERRIDES+=(P2P_BASE "$2");;
     --interval-ms) OVERRIDES+=(BLOCK_INTERVAL_MS "$2");; --mode) OVERRIDES+=(MINING_MODE "$2");;
     --rpc-bind) OVERRIDES+=(RPC_BIND "$2");; --p2p-bind) OVERRIDES+=(P2P_BIND "$2");;
@@ -77,7 +78,7 @@ for dep in jq curl awk lsof realpath; do command -v "$dep" >/dev/null || die "Mi
 ROOT=$(realpath "$ROOT")
 case "$ROOT" in /|"$HOME"|"$PROJECT_DIR"|*$'\n'*|*$'\r'*|*$'\t'*) die 'Choose a dedicated cluster subdirectory';; esac
 case "$PROJECT_DIR/" in "$ROOT/"*) die 'Root must not contain the project';; esac
-KEYS='MINERS SYNCS RPC_BASE P2P_BASE BLOCK_INTERVAL_MS MINING_MODE POW_ALGO RPC_BIND P2P_BIND MINER_CPU CKB_BIN LOCK_ARG GENESIS_MESSAGE'
+KEYS='MINERS SYNCS BOOTS RPC_BASE P2P_BASE BLOCK_INTERVAL_MS MINING_MODE POW_ALGO RPC_BIND P2P_BIND MINER_CPU CKB_BIN LOCK_ARG GENESIS_MESSAGE'
 if [ -f "$ROOT/cluster.env" ]; then
   while IFS='=' read -r key value; do
     case "$key" in ''|'#'*) continue;; esac
@@ -100,11 +101,11 @@ for ((i=0; i<${#OVERRIDES[@]}; i+=2)); do
   fi
   printf -v "$key" '%s' "$value"
 done
-for key in MINERS SYNCS RPC_BASE P2P_BASE BLOCK_INTERVAL_MS BLOCKS TIMEOUT; do
+for key in MINERS SYNCS BOOTS RPC_BASE P2P_BASE BLOCK_INTERVAL_MS BLOCKS TIMEOUT; do
   value=${!key}
   [[ "$value" =~ ^(0|[1-9][0-9]{0,8})$ ]] || die "$key must be a nonnegative integer"
 done
-[ "$MINERS" -ge 1 ] && [ "$((MINERS+SYNCS))" -le 64 ] || die 'Use 1..64 nodes, at least one miner'
+[ "$MINERS" -ge 1 ] && [ "$((MINERS+SYNCS+BOOTS))" -le 64 ] || die 'Use 1..64 nodes, at least one miner'
 [ "$BLOCK_INTERVAL_MS" -gt 0 ] && [ "$BLOCKS" -gt 0 ] && [ "$TIMEOUT" -gt 0 ] || die 'Interval/blocks/timeout must be positive'
 case "$MINING_MODE" in solo|staggered|race|ondemand) ;; *) die 'Invalid mining mode';; esac
 case "$POW_ALGO" in dummy|eaglesong) ;; *) die 'Invalid PoW algorithm; use --pow dummy|eaglesong';; esac
@@ -112,8 +113,8 @@ for key in RPC_BIND P2P_BIND; do
   case "${!key}" in 127.0.0.1|0.0.0.0) ;; *) die "$key must be 127.0.0.1 or 0.0.0.0";; esac
 done
 [[ "$MINER_CPU" =~ ^(0|[1-9]|[1-9][0-9]|100)$ ]] || die '--miner-cpu must be an integer from 0 to 100'
-case "$ROLE" in miner|sync) ;; *) die 'Invalid role';; esac
-[[ "$NODE" =~ ^(all|miner-[0-9]+|sync-[0-9]+)$ ]] || die 'Invalid node ID'
+case "$ROLE" in miner|sync|boot) ;; *) die 'Invalid role';; esac
+[[ "$NODE" =~ ^(all|miner-[0-9]+|sync-[0-9]+|boot-[0-9]+)$ ]] || die 'Invalid node ID'
 [[ "$LOCK_ARG" =~ ^0x[0-9a-fA-F]{40}$ ]] || die 'LOCK_ARG must be 20 bytes'
 
 save_env() { for key in $KEYS; do printf '%s=%s\n' "$key" "${!key}"; done > "$ROOT/cluster.env"; }
@@ -365,21 +366,17 @@ init_node() {
   "$CKB_BIN" peer-id gen --secret-path "$DIR/data/network/secret_key" >> "$DIR/logs/init.log" 2>&1
   peer=$("$CKB_BIN" peer-id from-secret --secret-path "$DIR/data/network/secret_key" | awk '{print $NF}')
   [[ "$peer" =~ ^[A-Za-z0-9]+$ ]] || die 'Unexpected peer-id output'
-  if [ "$id" != miner-0 ]; then
-    local bp bpeer
-    read -r bp bpeer <<< "$(awk '$1=="miner-0"{print $4,$5}' "$ROOT/cluster.state")"
-    boot="[\"/ip4/127.0.0.1/tcp/$bp/p2p/$bpeer\"]"
-  fi
   awk -v port="$pp" -v rpc_port="$rp" -v rpc_bind="$RPC_BIND" -v p2p_bind="$P2P_BIND" -v boot="$boot" -v role="$role" '
-    /^\[/ { section=$0; skip=(role=="sync" && $0=="[block_assembler]") }
+    /^\[/ { section=$0; skip=(role!="miner" && $0=="[block_assembler]") }
     skip { next }
     section=="[network]" && /^listen_addresses[[:space:]]*=/ { print "listen_addresses = [\"/ip4/" p2p_bind "/tcp/" port "\"]"; next }
     section=="[rpc]" && /^listen_address[[:space:]]*=/ { print "listen_address = \"" rpc_bind ":" rpc_port "\""; next }
+    section=="[network]" && /^bootnode_mode[[:space:]]*=/ { next }
     /^bootnodes[[:space:]]*=/ { print "bootnodes = " boot; next }
     /^discovery_local_address[[:space:]]*=/ { print "discovery_local_address = true"; next }
     /^cache_size[[:space:]]*=/ { print "cache_size = 16777216"; next }
     { print }
-    /^\[network\]/ { print "whitelist_peers = " boot }
+    /^\[network\]/ { print "whitelist_peers = " boot; print "bootnode_mode = " (role=="boot" ? "true" : "false") }
   ' "$DIR/ckb.toml" > "$DIR/ckb.toml.tmp"
   mv "$DIR/ckb.toml.tmp" "$DIR/ckb.toml"
   write_miner "$BLOCK_INTERVAL_MS"
@@ -395,7 +392,7 @@ cmd_init() {
   [ ! -s "$ROOT/cluster.state" ] || die 'Partial init; inspect logs then clean --force and retry'
   need_ckb
   local ports=() i
-  for ((i=0;i<MINERS+SYNCS;i++)); do ports+=("$((RPC_BASE+i))" "$((P2P_BASE+i))"); done
+  for ((i=0;i<MINERS+SYNCS+BOOTS;i++)); do ports+=("$((RPC_BASE+i))" "$((P2P_BASE+i))"); done
   free_ports "${ports[@]}"
   mkdir -p "$ROOT/shared" "$ROOT/nodes" "$ROOT/evidence"
   echo 'ckb-cluster-v1' > "$ROOT/.ckb-cluster"
@@ -405,6 +402,8 @@ cmd_init() {
   "$CKB_BIN" --version > "$ROOT/shared/ckb.version"
   for ((i=0;i<MINERS;i++)); do init_node "miner-$i" miner "$i"; done
   for ((i=0;i<SYNCS;i++)); do init_node "sync-$i" sync "$((MINERS+i))"; done
+  for ((i=0;i<BOOTS;i++)); do init_node "boot-$i" boot "$((MINERS+SYNCS+i))"; done
+  configure_bootnodes
   touch "$ROOT/.ready"
 }
 wait_rpc() {
@@ -414,14 +413,42 @@ wait_rpc() {
     sleep 1
   done
 }
-connect_peers() {
-  local id r rp pp peer hub hport
-  read -r hport hub <<< "$(awk '$1=="miner-0"{print $4,$5}' "$ROOT/cluster.state")"
+# Dedicated boot nodes are the hubs; zero boots preserves the miner-0 hub.
+bootstrap_rows() {
+  if awk '$2=="boot" {found=1} END {exit !found}' "$ROOT/cluster.state"; then
+    awk '$2=="boot"' "$ROOT/cluster.state"
+  else
+    awk '$1=="miner-0"' "$ROOT/cluster.state"
+  fi
+}
+configure_bootnodes() {
+  local id r rp pp peer hid hr hp hpp hpeer boot sep file
   while read -r id r rp pp peer; do
-    [ "$id" != miner-0 ] || continue
-    rpc "$id" add_node "[\"$hub\",\"/ip4/127.0.0.1/tcp/$hport\"]" >/dev/null
-    rpc miner-0 add_node "[\"$peer\",\"/ip4/127.0.0.1/tcp/$pp\"]" >/dev/null
+    boot='['; sep=''
+    while read -r hid hr hp hpp hpeer; do
+      [ "$hid" != "$id" ] || continue
+      boot="$boot$sep\"/ip4/127.0.0.1/tcp/$hpp/p2p/$hpeer\""; sep=','
+    done < <(bootstrap_rows)
+    boot="$boot]"
+    file="$ROOT/nodes/$id/ckb.toml"
+    awk -v boot="$boot" '
+      /^\[/ {section=$0}
+      section=="[network]" && /^(bootnodes|whitelist_peers)[[:space:]]*=/ {next}
+      {print}
+      /^\[network\]/ {print "bootnodes = " boot; print "whitelist_peers = " boot}
+    ' "$file" > "$file.boot-next"
+    mv "$file.boot-next" "$file"
   done < "$ROOT/cluster.state"
+}
+connect_peers() {
+  local id r rp pp peer hid hr hp hpp hpeer
+  while read -r hid hr hp hpp hpeer; do
+    while read -r id r rp pp peer; do
+      [ "$id" != "$hid" ] || continue
+      rpc "$id" add_node "[\"$hpeer\",\"/ip4/127.0.0.1/tcp/$hpp\"]" >/dev/null
+      rpc "$hid" add_node "[\"$peer\",\"/ip4/127.0.0.1/tcp/$pp\"]" >/dev/null
+    done < "$ROOT/cluster.state"
+  done < <(bootstrap_rows)
 }
 pause() {
   local id r rp pp peer
@@ -498,7 +525,7 @@ intervals() {
 }
 status() {
   local id r rp pp peer tip peers base h np mp cap worker failed=0
-  echo "time=$(date -u +%FT%TZ) mode=$MINING_MODE pow=$POW_ALGO rpc_bind=$RPC_BIND p2p_bind=$P2P_BIND miner_cpu_requested=$MINER_CPU miners=$MINERS syncs=$SYNCS root=$ROOT"
+  echo "time=$(date -u +%FT%TZ) mode=$MINING_MODE pow=$POW_ALGO rpc_bind=$RPC_BIND p2p_bind=$P2P_BIND miner_cpu_requested=$MINER_CPU miners=$MINERS syncs=$SYNCS boots=$BOOTS root=$ROOT"
   base=$(height miner-0 2>/dev/null) || base=0
   while read -r id r rp pp peer; do
     np=- mp=- cap=- worker=-; lookup "$id"
@@ -680,7 +707,10 @@ case "$CMD" in
     # Cross-check against every allocated RPC and P2P port, even if stopped.
     awk -v a="$((RPC_BASE+idx))" -v b="$((P2P_BASE+idx))" '$3==a||$4==a||$3==b||$4==b {exit 1}' "$ROOT/cluster.state" || die 'Port ranges overlap'
     init_node "$id" "$ROLE" "$idx"
-    if [ "$ROLE" = miner ]; then MINERS=$((MINERS+1)); else SYNCS=$((SYNCS+1)); fi
+    case "$ROLE" in
+      miner) MINERS=$((MINERS+1));; sync) SYNCS=$((SYNCS+1));; boot) BOOTS=$((BOOTS+1));;
+    esac
+    configure_bootnodes
     save_env; lookup "$id"; launch node run; wait_rpc "$id"; connect_peers; wait_views
     if [ "$ROLE" = miner ]; then NODE=all; pause; resume; fi
     status;;

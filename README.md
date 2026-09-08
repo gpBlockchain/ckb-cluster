@@ -20,6 +20,41 @@ To select a specific release, pass its version to the downloader, for example `.
 
 The initialized cluster saves the binary path in `tmp/cluster.env`. Subsequent commands, including `./ckb-cluster.sh up` after stopping the cluster, reuse that path; no repeated download or `--ckb` argument is needed as long as the binary remains available. After cleaning the cluster, run `bash ckb-cluster.sh up` to reuse the local download. A saved binary path remains pinned; a missing explicit or saved binary is an error, not a reason to switch versions.
 
+## Node Counts and Boot Nodes
+
+Set each role independently when creating a cluster: `--miners N --syncs M --boots B`.
+Defaults are **2 miners + 2 read-only sync nodes + 0 boot nodes**. Counts must be
+nonnegative integers, with at least one miner and at most 64 nodes in total.
+
+```bash
+# New cluster with two dedicated boot nodes; choose unused ports.
+./ckb-cluster.sh up --root tmp-boots --miners 2 --syncs 2 --boots 2 \
+  --rpc-base 21114 --p2p-base 21215
+
+# Add one boot node to a running cluster, including an older cluster.
+./ckb-cluster.sh add-node --root tmp-boots --role boot
+./ckb-cluster.sh status --root tmp-boots
+./stop-ckb.sh --root tmp-boots --node boot-0
+```
+
+- IDs are `miner-N`, `sync-N`, and `boot-N`. Boot nodes run normal CKB nodes,
+  with `bootnode_mode = true`, sync and validate the chain, but have no block
+  assembler and never launch miners.
+  They are dedicated discovery/connection entry points, not a separate lightweight binary.
+- With boot nodes present, every node uses all boot nodes except itself in its
+  `bootnodes` and `whitelist_peers` lists. Startup connects nodes to these hubs.
+  With zero boot nodes, the existing `miner-0` hub topology is retained.
+- Initial port allocation remains miners first, then sync nodes, then boot nodes;
+  adding a node appends the next port pair without renumbering existing nodes.
+- `BOOTS` is saved in `cluster.env` and displayed as `boots` by `status`.
+  Older configurations without `BOOTS` default to zero. Counts on an initialized
+  cluster are not resized by `up --boots`; use `add-node --role boot` to grow it,
+  or a new root for a different initial topology.
+- Adding a boot node updates persisted peer lists and connects the running nodes
+  through RPC. Existing connections are retained; the updated whitelist is loaded
+  on the next node restart. Normal status, logs, stop, snapshot and export commands
+  also include boot nodes.
+
 ## External Node Access
 
 New clusters default to **`--rpc-bind 0.0.0.0 --p2p-bind 0.0.0.0`**, allowing access through any reachable IPv4 interface. The two options are independent and accept `0.0.0.0` or `127.0.0.1`.
@@ -159,6 +194,7 @@ bash tests/default-ckb.sh
 bash tests/pow.sh
 bash tests/bind.sh
 bash tests/miner-cpu.sh
+bash tests/boots.sh
 ```
 
 These tests use local fixtures and do not start nodes or download binaries.
